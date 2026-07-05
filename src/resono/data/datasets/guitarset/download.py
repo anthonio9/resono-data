@@ -18,10 +18,19 @@ def download(raw_dir: Path) -> None:
         archive = dest / filename
         if not archive.exists():
             print(f"Downloading {filename} …")
-            urllib.request.urlretrieve(url, archive)
+            # Download to a temporary path and rename on success, so an
+            # interrupted transfer never leaves a corrupt archive that the
+            # existence check would happily skip on the next run.
+            tmp = archive.with_suffix(archive.suffix + ".part")
+            urllib.request.urlretrieve(url, tmp)
+            tmp.replace(archive)
 
+        # Extract each archive into its own named directory (audio_mono-mic/,
+        # annotation/). This makes the on-disk layout deterministic regardless
+        # of whether the zip wraps its contents in a top-level folder; preprocess
+        # discovers files with rglob and so tolerates any nesting depth.
         out_dir = dest / filename.replace(".zip", "")
         if not out_dir.exists():
             print(f"Extracting {filename} …")
             with zipfile.ZipFile(archive) as zf:
-                zf.extractall(dest)
+                zf.extractall(out_dir)

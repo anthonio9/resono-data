@@ -109,7 +109,10 @@ def test_boundary_item_correct_shape(fake_dataset):
 
 
 def test_boundary_tail_is_zero_padded(fake_dataset):
-    """Audio tail must be zero for frames that extend past the track end."""
+    """Audio tail must be zero for frames that extend past the track end,
+    and the item must still be exactly W*H long even when the raw audio
+    length is not an exact multiple of hop_size (regression: trailing
+    samples must not leak into the fixed-size window)."""
     fd = fake_dataset
     ds = make_dataset(fd)
     H  = fd["hop_size"]
@@ -122,9 +125,11 @@ def test_boundary_tail_is_zero_padded(fake_dataset):
 
     item = ds[last_frame]
     audio = item["audio"]
+
+    # Exact fixed size regardless of the misaligned raw length.
+    assert audio.shape == (W * H,)
     # First H samples correspond to the real frame; the rest must be zeros.
-    real_samples = H
-    assert audio[real_samples:].sum().item() == 0.0
+    assert audio[H:].sum().item() == 0.0
 
 
 # ---------------------------------------------------------------------------

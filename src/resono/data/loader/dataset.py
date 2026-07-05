@@ -78,6 +78,12 @@ class Dataset(TorchDataset):
         for _, n, _ in self._items:
             self._cum.append(self._cum[-1] + n)
 
+        # Lazily-populated per-process cache of open memmaps, keyed by prefix.
+        # Left empty here on purpose: with DataLoader workers the dataset is
+        # forked, and memmaps are opened on first access *inside* each worker
+        # rather than shared across the fork boundary.
+        self._cache: dict[str, dict[str, np.ndarray]] = {}
+
         # Precompute index pools by scanning voiced.npy files.
         self.voiced_idx: list[int] = []
         self.onset_idx:  list[int] = []
@@ -116,13 +122,17 @@ class Dataset(TorchDataset):
     def inference_idx(self) -> list[int]:
         """Non-overlapping chunk starts covering every track sequentially.
 
-        Includes silent chunks so the full-track prediction can be
-        reconstructed without gaps. Pair with EpochSampler(shuffle=False).
+        Chunks tile each track end to end with stride window_frames. The final
+        chunk of a track may run past its end; __getitem__ zero-pads that tail,
+        so every real frame — including silence and the last partial window —
+        is covered exactly once. This lets a full-track prediction be
+        reconstructed without gaps. Pair with EpochSampler(shuffle=False), and
+        discard predictions beyond each track's true length when reassembling.
         """
         indices = []
         for item_idx, (_, n_frames, _) in enumerate(self._items):
             offset = self._cum[item_idx]
-            for f in range(0, n_frames - self.window_frames + 1, self.window_frames):
+            for f in range(0, n_frames, self.window_frames):
                 indices.append(offset + f)
         return indices
 
@@ -133,17 +143,29 @@ class Dataset(TorchDataset):
     def __len__(self) -> int:
         return self._cum[-1]
 
+    def _get_arrays(self, prefix: Path) -> dict[str, np.ndarray]:
+        """Return cached memmaps for a track, opening them on first access."""
+        key = str(prefix)
+        arrays = self._cache.get(key)
+        if arrays is None:
+            arrays = {
+                "audio":  np.load(f"{prefix}-audio.npy",  mmap_mode="r"),
+                "pitch":  np.load(f"{prefix}-pitch.npy",  mmap_mode="r"),
+                "voiced": np.load(f"{prefix}-voiced.npy", mmap_mode="r"),
+            }
+            self._cache[key] = arrays
+        return arrays
+
     def __getitem__(self, idx: int) -> dict:
-        item_idx              = bisect.bisect_right(self._cum, idx) - 1
-        frame                 = idx - self._cum[item_idx]
+        item_idx               = bisect.bisect_right(self._cum, idx) - 1
+        frame                  = idx - self._cum[item_idx]
         prefix, n_frames, stem = self._items[item_idx]
 
         W = self.window_frames
         H = self.hop_size
 
-        pitch  = np.load(f"{prefix}-pitch.npy",  mmap_mode="r")
-        voiced = np.load(f"{prefix}-voiced.npy", mmap_mode="r")
-        audio  = np.load(f"{prefix}-audio.npy",  mmap_mode="r")
+        arrays = self._get_arrays(prefix)
+        pitch, voiced, audio = arrays["pitch"], arrays["voiced"], arrays["audio"]
 
         end_frame = frame + W
 
@@ -154,11 +176,13 @@ class Dataset(TorchDataset):
         else:
             # Window extends past the track end: zero-pad the tail so that
             # boundary frames (including track onsets when context < window)
-            # are seen during training.
+            # are seen during training. Audio is clipped to the frame grid
+            # (n_frames * H) first — the raw file may carry up to H-1 extra
+            # samples that must not leak into the fixed-size window.
             pad_f    = end_frame - n_frames
             p        = np.array(pitch[...,  frame:])
             v        = np.array(voiced[..., frame:])
-            a        = np.array(audio[frame * H:])
+            a        = np.array(audio[frame * H : n_frames * H])
             pitch_s  = np.concatenate([p, np.zeros((*p.shape[:-1], pad_f), dtype=np.float32)], axis=-1)
             voiced_s = np.concatenate([v, np.zeros((*v.shape[:-1], pad_f), dtype=bool)],       axis=-1)
             audio_s  = np.concatenate([a, np.zeros(pad_f * H,              dtype=np.float32)])

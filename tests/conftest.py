@@ -40,7 +40,11 @@ def fake_dataset(tmp_path):
     ]
 
     for stem, n_frames in tracks:
-        n_samples = n_frames * HOP_SIZE
+        # Deliberately non-aligned: real resampled audio almost never has a
+        # length that is an exact multiple of hop_size. The extra 37 samples
+        # (< HOP_SIZE, so n_frames is unchanged) exercise the boundary-padding
+        # path and would expose any leakage of trailing samples into a window.
+        n_samples = n_frames * HOP_SIZE + 37
         audio     = rng.standard_normal(n_samples).astype(np.float32)
 
         pitch  = np.zeros((N_STRINGS, n_frames), dtype=np.float32)

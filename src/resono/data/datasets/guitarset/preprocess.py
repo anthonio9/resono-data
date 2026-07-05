@@ -42,21 +42,23 @@ def preprocess(
         Maximum pitch deviation (cents) allowed in the tail before a frame
         is considered an overhang and silenced. Default 15 cents.
     """
-    audio_dir = Path(raw_dir) / "guitarset" / "audio_mono-mic"
-    ann_dir   = Path(raw_dir) / "guitarset" / "annotation"
+    gset_root = Path(raw_dir) / "guitarset"
     out_dir   = Path(cache_dir) / "guitarset"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     hop_s = hop_size / sample_rate
 
-    audio_files = sorted(audio_dir.glob("*_mic.wav"))
+    # Discover files with rglob so the exact extraction layout doesn't matter:
+    # mono-mic audio ends in '_mic.wav', annotations in '.jams', wherever they sit.
+    audio_files = sorted(gset_root.rglob("*_mic.wav"))
     if not audio_files:
-        raise FileNotFoundError(f"No *_mic.wav files found in {audio_dir}")
+        raise FileNotFoundError(f"No *_mic.wav files found under {gset_root}")
+    jams_index = {p.stem: p for p in gset_root.rglob("*.jams")}
 
     for audio_file in audio_files:
         stem = audio_file.stem.replace("_mic", "")
-        jams_file = ann_dir / f"{stem}.jams"
-        if not jams_file.exists():
+        jams_file = jams_index.get(stem)
+        if jams_file is None:
             print(f"  warning: no JAMS for {stem}, skipping")
             continue
 
@@ -72,10 +74,10 @@ def preprocess(
         # --- pitch & voiced ---
         jam = jams.load(str(jams_file))
         n_frames = len(audio) // hop_size
-        pitch, voiced = extract_pitch_array_jams(jam, hop_s, n_frames)
+        pitch, voiced, note_ids = extract_pitch_note_arrays_jams(jam, hop_s, n_frames)
         if remove_overhangs:
-            pitch, voiced = _remove_pitch_overhangs(
-                jam, pitch, voiced, hop_s, n_frames,
+            pitch, voiced = remove_pitch_overhangs(
+                pitch, voiced, note_ids,
                 overhang_divider, overhang_threshold_cents,
             )
         np.save(out_dir / f"{stem}-pitch.npy",  pitch)
@@ -85,106 +87,208 @@ def preprocess(
 
 
 # ---------------------------------------------------------------------------
-# JAMS helpers
+# JAMS → uniform grid
 # ---------------------------------------------------------------------------
+
+def _obs_seconds(t) -> float:
+    """JAMS observation times are pd.Timedelta from disk but float when built
+    programmatically — normalise both to seconds."""
+    return t.total_seconds() if hasattr(t, "total_seconds") else float(t)
+
 
 def extract_pitch_array_jams(
     jam: jams.JAMS,
     hop_size_seconds: float,
     n_frames: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Extract per-string pitch arrays from a GuitarSet JAMS object.
+    """Extract per-string pitch and voicing arrays from a GuitarSet JAMS object.
 
-    Parameters
-    ----------
-    jam:
-        Loaded JAMS object.
-    hop_size_seconds:
-        Seconds between consecutive pitch frames.
-    n_frames:
-        Target number of frames (= audio_samples // hop_size).
+    Thin wrapper over :func:`extract_pitch_note_arrays_jams` for callers that
+    only need the pitch/voicing grids and not the per-frame note ids.
 
     Returns
     -------
     pitch  : float32 (6, n_frames)  Hz, 0.0 for unvoiced frames
     voiced : bool    (6, n_frames)
     """
+    pitch, voiced, _ = extract_pitch_note_arrays_jams(jam, hop_size_seconds, n_frames)
+    return pitch, voiced
+
+
+def extract_pitch_note_arrays_jams(
+    jam: jams.JAMS,
+    hop_size_seconds: float,
+    n_frames: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Extract per-string pitch, voicing, and note-id arrays from a JAMS object.
+
+    The raw ``pitch_contour`` observations sit on GuitarSet's native ~5.8 ms
+    grid. This resamples them onto the target frame grid defined by
+    ``hop_size_seconds`` using per-note linear interpolation in log-frequency
+    space. Unlike a plain nearest-frame assignment, interpolation fills the
+    interior of sustained notes even when the target hop is *finer* than the
+    native one, so no spurious unvoiced holes appear inside a held note.
+
+    Parameters
+    ----------
+    jam:
+        Loaded JAMS object.
+    hop_size_seconds:
+        Seconds between consecutive target frames. Frame f starts at time
+        f * hop_size_seconds, matching the loader's "frame f starts at
+        sample f * hop_size" convention.
+    n_frames:
+        Target number of frames (= audio_samples // hop_size).
+
+    Returns
+    -------
+    pitch    : float32 (6, n_frames)  Hz, 0.0 for unvoiced frames
+    voiced   : bool    (6, n_frames)
+    note_ids : int32   (6, n_frames)  per-frame note index, -1 where unvoiced.
+        Ids are assigned per string in note order (0, 1, 2, …); combined with
+        the string axis they identify each note uniquely and let downstream
+        steps (e.g. overhang removal) recover exact note boundaries.
+    """
     pitch_anns = jam.annotations["pitch_contour"]
     n_strings  = len(pitch_anns)
 
-    pitch  = np.zeros((n_strings, n_frames), dtype=np.float32)
-    voiced = np.zeros((n_strings, n_frames), dtype=bool)
+    pitch    = np.zeros((n_strings, n_frames), dtype=np.float32)
+    voiced   = np.zeros((n_strings, n_frames), dtype=bool)
+    note_ids = np.full((n_strings, n_frames), -1, dtype=np.int32)
 
     for s, ann in enumerate(pitch_anns):
+        times, freqs, ids = [], [], []
         for obs in ann:
             if not obs.value["voiced"] or obs.value["frequency"] == 0:
                 continue
-            t = obs.time
-            t_seconds = t.total_seconds() if hasattr(t, "total_seconds") else float(t)
-            frame = int(round(t_seconds / hop_size_seconds))
-            if 0 <= frame < n_frames:
-                pitch[s, frame]  = obs.value["frequency"]
-                voiced[s, frame] = True
+            times.append(_obs_seconds(obs.time))
+            freqs.append(float(obs.value["frequency"]))
+            ids.append(int(obs.value.get("index", 0)))
 
-    return pitch, voiced
+        if times:
+            pitch[s], voiced[s], note_ids[s] = _resample_string_to_grid(
+                np.asarray(times, dtype=np.float64),
+                np.asarray(freqs, dtype=np.float64),
+                np.asarray(ids, dtype=np.int64),
+                n_frames,
+                hop_size_seconds,
+            )
+
+    return pitch, voiced, note_ids
+
+
+def _resample_string_to_grid(
+    times: np.ndarray,
+    freqs: np.ndarray,
+    note_ids: np.ndarray,
+    n_frames: int,
+    hop_s: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Resample one string's observations onto the uniform target grid.
+
+    Observations are segmented into notes (by JAMS note index, and further
+    split wherever a time gap exceeds twice the native hop so that a missing
+    index field can never merge two notes across a rest). Each note's
+    log-frequency curve is linearly interpolated onto the grid points that
+    fall within its time span; those frames are marked voiced and tagged with
+    a per-string note id (contiguous 0, 1, 2, …); unvoiced frames stay -1.
+    """
+    pitch    = np.zeros(n_frames, dtype=np.float32)
+    voiced   = np.zeros(n_frames, dtype=bool)
+    note_grid = np.full(n_frames, -1, dtype=np.int32)
+
+    order    = np.argsort(times, kind="stable")
+    times    = times[order]
+    freqs    = freqs[order]
+    note_ids = note_ids[order]
+
+    grid = np.arange(n_frames) * hop_s
+    tol  = hop_s / 2.0
+    gap  = 2.0 * _NATIVE_HOP_S
+
+    # Note boundaries: index change OR a rest longer than `gap`.
+    if len(times) > 1:
+        splits = np.where((np.diff(note_ids) != 0) | (np.diff(times) > gap))[0] + 1
+    else:
+        splits = np.array([], dtype=np.int64)
+
+    for note_no, seg in enumerate(np.split(np.arange(len(times)), splits)):
+        t = times[seg]
+        f = freqs[seg]
+        t0, t1 = t[0], t[-1]
+
+        sel = np.where((grid >= t0 - tol) & (grid <= t1 + tol))[0]
+        if sel.size == 0:
+            # A note shorter than one frame lands between grid points: snap it
+            # to the nearest frame so single-observation notes aren't dropped.
+            k = int(round(t0 / hop_s))
+            if 0 <= k < n_frames:
+                pitch[k]     = np.float32(f[0])
+                voiced[k]    = True
+                note_grid[k] = note_no
+            continue
+
+        log_hz          = np.interp(grid[sel], t, np.log2(f))
+        pitch[sel]      = np.exp2(log_hz).astype(np.float32)
+        voiced[sel]     = True
+        note_grid[sel]  = note_no
+
+    return pitch, voiced, note_grid
 
 
 # ---------------------------------------------------------------------------
 # Overhang removal
 # ---------------------------------------------------------------------------
 
-def _remove_pitch_overhangs(
-    jam: jams.JAMS,
+def remove_pitch_overhangs(
     pitch: np.ndarray,
     voiced: np.ndarray,
-    hop_size_seconds: float,
-    n_frames: int,
-    divider: int,
-    threshold_cents: float,
+    note_ids: np.ndarray,
+    divider: int = 5,
+    threshold_cents: float = 15.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Silence frames at the end of notes where pitch drifts beyond threshold.
 
     Guitar strings decay after plucking, and the pitch often wanders in the
     final moments of a note before falling silent. These 'overhang' frames
-    are technically voiced but carry unreliable pitch information. Removing
+    are technically voiced but carry unreliable pitch information; removing
     them gives the model cleaner targets.
 
-    The last 1/divider frames of each note are inspected. Any frame whose
-    pitch deviates more than threshold_cents from the note body mean is
-    silenced (pitch set to 0, voiced set to False). Frames within threshold
-    are kept even if they are in the tail.
+    Notes are recovered from ``note_ids`` (the per-frame note tags produced by
+    :func:`extract_pitch_note_arrays_jams`), so exact JAMS note boundaries are
+    honoured — two adjacent notes on one string are never merged, which would
+    otherwise pollute the body-mean reference and risk silencing a legitimate
+    note's tail. For each note, the mean pitch over its body (the first
+    1 - 1/divider of its frames) is the reference; any tail frame deviating
+    more than threshold_cents from it is silenced. Frames within threshold are
+    kept even if they lie in the tail.
     """
-    pitch_anns = jam.annotations["pitch_contour"]
     pitch  = pitch.copy()
     voiced = voiced.copy()
 
-    for s, ann in enumerate(pitch_anns):
-        # Collect per-note observations: note_idx → [(frame, freq), ...]
-        notes: dict[int, list[tuple[int, float]]] = {}
-        for obs in ann:
-            if not obs.value["voiced"] or obs.value["frequency"] == 0:
-                continue
-            t = obs.time
-            t_s = t.total_seconds() if hasattr(t, "total_seconds") else float(t)
-            frame = int(round(t_s / hop_size_seconds))
-            if not (0 <= frame < n_frames):
-                continue
-            note_idx = obs.value.get("index", 0)
-            notes.setdefault(note_idx, []).append((frame, obs.value["frequency"]))
-
-        for frames_freqs in notes.values():
-            frames_freqs.sort(key=lambda x: x[0])
-            n = len(frames_freqs)
+    for s in range(voiced.shape[0]):
+        ids = note_ids[s]
+        for note in np.unique(ids[ids >= 0]):
+            frames = np.where(ids == note)[0]
+            n = frames.size
             if n < divider:
                 continue
 
-            tail_start  = n - n // divider
-            body_mean   = np.mean([f for _, f in frames_freqs[:tail_start]])
+            tail_start   = frames[0] + (n - n // divider)
+            body_frames  = frames[frames < tail_start]
+            body         = pitch[s, body_frames]
+            body         = body[body > 0]
+            if body.size == 0:
+                continue
+            body_mean = float(body.mean())
 
-            for frame, freq in frames_freqs[tail_start:]:
-                deviation = abs(1200.0 * np.log2(freq / body_mean))
-                if deviation > threshold_cents:
-                    pitch[s, frame]  = 0.0
-                    voiced[s, frame] = False
+            tail_frames = frames[frames >= tail_start]
+            tail_vals   = pitch[s, tail_frames]
+            with np.errstate(divide="ignore", invalid="ignore"):
+                deviation = np.abs(1200.0 * np.log2(tail_vals / body_mean))
+            drop_idx = tail_frames[(tail_vals > 0) & (deviation > threshold_cents)]
+
+            pitch[s, drop_idx]  = 0.0
+            voiced[s, drop_idx] = False
 
     return pitch, voiced
