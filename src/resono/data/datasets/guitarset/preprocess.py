@@ -4,6 +4,7 @@ import jams
 import librosa
 import numpy as np
 import soundfile as sf
+from tqdm import tqdm
 
 # GuitarSet native analysis parameters
 _NATIVE_HOP   = 256
@@ -19,6 +20,7 @@ def preprocess(
     remove_overhangs: bool = False,
     overhang_divider: int = 5,
     overhang_threshold_cents: float = 15.0,
+    progress: bool = True,
 ) -> None:
     """Convert raw GuitarSet files to .npy cache.
 
@@ -41,6 +43,9 @@ def preprocess(
     overhang_threshold_cents:
         Maximum pitch deviation (cents) allowed in the tail before a frame
         is considered an overhang and silenced. Default 15 cents.
+    progress:
+        Show a progress bar over tracks. Enabled by default; pass False (or
+        --no-progress-bar on the CLI) to silence it.
     """
     gset_root = Path(raw_dir) / "guitarset"
     out_dir   = Path(cache_dir) / "guitarset"
@@ -55,11 +60,13 @@ def preprocess(
         raise FileNotFoundError(f"No *_mic.wav files found under {gset_root}")
     jams_index = {p.stem: p for p in gset_root.rglob("*.jams")}
 
-    for audio_file in audio_files:
+    for audio_file in tqdm(
+        audio_files, desc="Preprocessing", unit="track", disable=not progress
+    ):
         stem = audio_file.stem.replace("_mic", "")
         jams_file = jams_index.get(stem)
         if jams_file is None:
-            print(f"  warning: no JAMS for {stem}, skipping")
+            tqdm.write(f"  warning: no JAMS for {stem}, skipping")
             continue
 
         # --- audio ---

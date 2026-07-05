@@ -1,14 +1,18 @@
 """CLI for the GuitarSet dataset pipeline.
 
 Usage:
-    python -m resono.data.datasets.guitarset download   [--raw-dir DIR]
+    python -m resono.data.datasets.guitarset download   [--raw-dir DIR] [--no-progress-bar]
     python -m resono.data.datasets.guitarset preprocess [--raw-dir DIR] [--cache-dir DIR]
                                                         [--sample-rate SR] [--hop-size H]
+                                                        [--no-progress-bar]
     python -m resono.data.datasets.guitarset partition  [--cache-dir DIR] [--partitions-dir DIR]
                                                         [--no-player-split] [--seed N]
                                                         [--val-players P [P ...]]
                                                         [--test-players P [P ...]]
     python -m resono.data.datasets.guitarset cv-folds   [--cache-dir DIR] [--partitions-dir DIR]
+
+Progress bars (download bytes, preprocess tracks) are on by default; disable
+with --no-progress-bar.
 """
 import argparse
 from pathlib import Path
@@ -28,6 +32,8 @@ def main() -> None:
     # download
     dl = sub.add_parser("download", help="Download from Zenodo")
     dl.add_argument("--raw-dir", type=Path, default=Path("data/raw"))
+    dl.add_argument("--no-progress-bar", dest="progress",
+                    action="store_false", default=True)
 
     # preprocess
     pp = sub.add_parser("preprocess", help="Convert raw files to .npy cache")
@@ -38,6 +44,8 @@ def main() -> None:
     pp.add_argument("--remove-overhangs",         action="store_true", default=False)
     pp.add_argument("--overhang-divider",         type=int,   default=5)
     pp.add_argument("--overhang-threshold-cents", type=float, default=15.0)
+    pp.add_argument("--no-progress-bar", dest="progress",
+                    action="store_false", default=True)
 
     # partition
     pt = sub.add_parser("partition", help="Create train/valid/test split")
@@ -57,13 +65,14 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command == "download":
-        download(args.raw_dir)
+        download(args.raw_dir, progress=args.progress)
     elif args.command == "preprocess":
         preprocess(
             args.raw_dir, args.cache_dir, args.sample_rate, args.hop_size,
             remove_overhangs=args.remove_overhangs,
             overhang_divider=args.overhang_divider,
             overhang_threshold_cents=args.overhang_threshold_cents,
+            progress=args.progress,
         )
     elif args.command == "partition":
         partition(
