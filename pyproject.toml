@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "resono-data"
+version = "0.1.0"
+description = "Data pipeline for guitar pitch recognition datasets"
+authors = [{name = "Antoni Jankowski", email = "antoni.s.jankowski@gmail.com"}]
+license = {text = "MIT"}
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "torch",
+    "soundfile",
+    "librosa",
+    "jams",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+namespaces = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+    "integration: requires a downloaded dataset (skip with '-m not integration')",
+]

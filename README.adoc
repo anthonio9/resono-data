@@ -1,0 +1,159 @@
+= resono-data
+:toc: left
+:source-highlighter: highlight.js
+
+Dataset downloading, preprocessing, and PyTorch DataLoaders for guitar pitch recognition.
+Importable as `resono.data` — a namespace package designed to sit alongside the `resono` model repository.
+
+== Installation
+
+[source,bash]
+----
+pip install -e .
+----
+
+== GuitarSet pipeline
+
+Run the three steps in order.
+All paths default to `data/raw`, `data/cache`, and `data/partitions` relative to your working directory.
+
+=== 1. Download
+
+Downloads audio and annotation archives from Zenodo (≈ 1.5 GB).
+Skips files that already exist.
+
+[source,bash]
+----
+python -m resono.data.datasets.guitarset download
+----
+
+=== 2. Preprocess
+
+Resamples audio and extracts per-string pitch arrays from JAMS annotations into `.npy` files.
+
+[source,bash]
+----
+python -m resono.data.datasets.guitarset preprocess
+----
+
+[cols="2,1,4", options="header"]
+|===
+| Flag | Default | Description
+| `--sample-rate` | `22050` | Target sample rate in Hz
+| `--hop-size` | `256` | Audio samples per pitch frame (~11.6 ms at 22050 Hz)
+| `--raw-dir` | `data/raw` | Location of downloaded archives
+| `--cache-dir` | `data/cache` | Output directory for `.npy` files
+|===
+
+=== 3. Partition
+
+Writes `data/partitions/guitarset.json` with train/valid/test stem lists.
+
+[source,bash]
+----
+python -m resono.data.datasets.guitarset partition
+----
+
+By default uses a player-based split: players `00`–`03` → train, `04` → valid, `05` → test.
+This prevents player identity from leaking across splits.
+
+To use a random 70/15/15 split instead:
+
+[source,bash]
+----
+python -m resono.data.datasets.guitarset partition --no-player-split
+----
+
+==== Cross-validation folds (optional)
+
+Writes six `guitarset_fold{0-5}.json` files, each rotating a different player into the test role:
+
+[source,bash]
+----
+python -m resono.data.datasets.guitarset cv-folds
+----
+
+== Usage in Python
+
+[source,python]
+----
+from resono.data import get_loader
+
+loader = get_loader(
+    datasets=["guitarset"],
+    partitions_dir="data/partitions",
+    cache_dir="data/cache",
+    split="train",
+    hop_size=256,
+    window_frames=32,   # frames per batch item (~370 ms)
+    batch_size=32,
+)
+
+for batch in loader:
+    audio  = batch["audio"]   # (B, window_frames * hop_size)  float32
+    pitch  = batch["pitch"]   # (B, 6, window_frames)           float32, Hz
+    voiced = batch["voiced"]  # (B, 6, window_frames)           bool
+    stem   = batch["stem"]    # list[str], track identifier
+----
+
+=== Sampling modes
+
+Training loaders draw only from pre-filtered index pools, so the model never trains on silent chunks.
+
+[cols="2,4", options="header"]
+|===
+| Mode | Behaviour
+| `voiced_idx` (default) | Samples any frame where at least one string is active. Covers onsets, sustained notes, and everything in between.
+| `onset_idx` | Restricts sampling to frames where at least one string transitions from unvoiced to voiced. Useful for onset-focused training. Enable with `use_onset_idx=True`.
+|===
+
+Both modes use `window_frames` consecutive frames per item.
+Setting `window_frames=1` gives single-frame recognition.
+
+Validation and test loaders use sequential non-overlapping chunks covering every track in full, including silent regions, so predictions can be reconstructed track by track.
+
+== Adding a new dataset
+
+=== 1. Implement the three pipeline functions
+
+Create `src/resono/data/datasets/<name>/` with at least:
+
+`download.py` — `download(raw_dir: Path) -> None`::
+  Fetch raw files from the source. Skip files that already exist.
+
+`preprocess.py` — `preprocess(raw_dir: Path, cache_dir: Path, **kwargs) -> None`::
+  Convert raw files to `.npy` arrays under `cache_dir/<name>/`.
+  Each track must produce three files:
++
+[source]
+----
+{stem}-audio.npy   float32  (N_samples,)
+{stem}-pitch.npy   float32  (6, N_frames)   Hz, 0.0 = unvoiced
+{stem}-voiced.npy  bool     (6, N_frames)
+----
+
+`partition.py` — `partition(cache_dir: Path, partitions_dir: Path, **kwargs) -> None`::
+  Write `partitions_dir/<name>.json`:
++
+[source,json]
+----
+{"train": ["stem_a", ...], "valid": ["stem_b", ...], "test": ["stem_c", ...]}
+----
+
+Optionally subclass `resono.data.datasets.base.DatasetModule` to get static type checking on the interface.
+
+=== 2. Register the dataset
+
+Add it to `src/resono/data/datasets/__init__.py`:
+
+[source,python]
+----
+from resono.data.datasets import guitarset, <name>
+
+REGISTRY = {
+    "guitarset": guitarset,
+    "<name>": <name>,
+}
+----
+
+Once registered, the dataset can be passed to `get_loader(datasets=["<name>", ...])`.
