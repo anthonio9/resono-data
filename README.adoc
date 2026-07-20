@@ -3,7 +3,7 @@
 :source-highlighter: highlight.js
 
 Dataset downloading, preprocessing, and PyTorch DataLoaders for guitar pitch recognition.
-Importable as `resono.data` — a namespace package designed to sit alongside the `resono` model repository.
+Importable as `resono.data` - a namespace package designed to sit alongside the `resono` model repository.
 
 == Installation
 
@@ -72,6 +72,47 @@ Writes six `guitarset_fold{0-5}.json` files, each rotating a different player in
 ----
 python -m resono.data.datasets.guitarset cv-folds
 ----
+
+== GAPS pipeline
+
+14 hours of classical (nylon-string) guitar, 300 performances by 200+ performers, labelled from aligned scores rather than from a pickup.
+
+[source,bash]
+----
+python -m resono.data.datasets.gaps download      # ~11 GB; --no-audio for annotations only
+python -m resono.data.datasets.gaps preprocess
+python -m resono.data.datasets.gaps partition
+----
+
+Preprocessing writes the same three files as GuitarSet plus `{stem}-onset.npy`, a bool `(6, N_frames)` array marking note-start frames. Voicing transitions cannot mark a re-struck note of the same pitch on the same string; this can.
+
+=== Where the labels come from
+
+No single GAPS annotation is sufficient, so preprocessing combines three:
+
+[cols="1,2,2"]
+|===
+| Source | Supplies | Cannot supply
+
+| MusicXML | pitch, string, fret, tuning | any performance time
+| syncpoints | measure downbeats in seconds (~1.3 per measure) | anything finer than a measure
+| fine-aligned MIDI | per-note onset and offset in seconds | string — every note is on channel 0
+|===
+
+Onsets therefore come from the MIDI, string labels from the MusicXML tablature, and the syncpoints supply the measure-level time prior that links them. Interpolating onsets from syncpoints alone lands a median 215-434 ms from the MIDI's — 18 to 37 frames at a 256-sample hop — so the MIDI is what makes frame-accurate labels possible.
+
+Because the MIDI carries no string information, transferring the score's string labels onto performance timing requires an alignment step. Repeats are expanded first (performers take repeats the score writes once), and the syncpoint count cross-checks that expansion.
+
+=== Known limitations
+
+* *String labels are approximate and unvalidated.* GAPS has no per-string ground truth, so their accuracy cannot be measured on this dataset. Roughly 6-9% of notes get no confident score match and fall back to a lowest-playable-fret heuristic. The dataset's own `.match` files pair only 18-28% of performed notes and are not a usable reference.
+* *Offsets are the weakest labels.* The GAPS authors evaluate onsets only, without offsets, so note durations — and hence voiced-region ends — are less reliable than onsets.
+* *Pitch is piecewise constant.* Labels come from the score, so GAPS contains no bends or vibrato. It is detection data, not continuous-f0 data.
+* *The official test split leaks performers.* It is a random 90:10 split by piece; 12 performers appear in both train and test. Validation is carved out by performer, which fixes train/valid but not train/test.
+* *Tablature is editorial fingering* and need not match what the performer actually played.
+* *No tuning-offset correction.* The authors' filter used a ±50-cent tolerance, which passes 20-30 cent offsets.
+
+GAPS is distributed for non-commercial research use only and should not be redistributed; see https://aim-qmul.github.io/GAPS/. The HuggingFace mirror's MIT tag conflicts with those terms.
 
 == Usage in Python
 
