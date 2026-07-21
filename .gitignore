@@ -22,5 +22,7 @@ htmlcov/
 .DS_Store
 
 # Datasets: raw downloads, .npy caches and partition JSONs are all generated
-# by the pipeline and run to many gigabytes.
-data/
+# by the pipeline and run to many gigabytes. Anchored to the repository root —
+# a bare "data/" would also match the src/resono/data/ package and silently
+# stop new source files from being committed.
+/data/

@@ -145,6 +145,29 @@ Every exclusion comes from one cross-check: syncpoint indices are performed meas
 
 GAPS is distributed for non-commercial research use only and should not be redistributed; see https://aim-qmul.github.io/GAPS/. The HuggingFace mirror's MIT tag conflicts with those terms.
 
+== Inspecting labels against audio
+
+Plots the preprocessed labels over the audio they describe, to check by eye that ground truth lands where the notes actually are.
+Reads the `.npy` cache, so it works for any dataset — the cache format is shared.
+
+Needs matplotlib: `pip install -e '.[viz]'`.
+
+[source,bash]
+----
+python -m resono.data plot --dataset guitarset --list-stems
+python -m resono.data plot --dataset gaps --stem 001_mvswc --start 40 --duration 8
+python -m resono.data plot --dataset gaps --stem 001_mvswc --theme dark --output plot.png
+----
+
+`--list-stems` prints the dataset's cached tracks with their duration and whether onset labels are present.
+Omitting `--stem` plots the first cached track.
+
+The upper panel draws the labelled pitch over a constant-Q spectrogram: CQT bins are logarithmic in frequency like pitch itself, so a correct label sits on the fundamental with its harmonics stacked evenly above.
+A linear STFT would crowd the low strings into a few pixels and hide exactly the errors worth seeing.
+The lower panel gives each string its own labelled lane — six categorical colours cannot be told apart reliably where they overlap, so strings are separated by position instead, and the lane label reports the pitch range observed rather than an assumed tuning.
+
+Onsets are drawn where the dataset provides them; GuitarSet has no onset file, and the title says so rather than leaving a silent absence.
+
 == Usage in Python
 
 [source,python]
