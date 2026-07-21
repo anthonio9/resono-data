@@ -281,10 +281,9 @@ def _measure_notes(
             onset = previous_onset if is_chord else cursor
             string = element.findtext(".//technical/string")
             fret = element.findtext(".//technical/fret")
-            if string is not None and fret is not None:
-                notes.append(
-                    (max(0, onset), _midi_pitch(pitch_element), int(string), int(fret))
-                )
+            pitch = _midi_pitch(pitch_element)
+            if string is not None and fret is not None and pitch is not None:
+                notes.append((max(0, onset), pitch, int(string), int(fret)))
 
             previous_onset = onset
             if not is_chord and not is_grace:
@@ -293,9 +292,20 @@ def _measure_notes(
     return notes
 
 
-def _midi_pitch(pitch: ET.Element) -> int:
-    """MIDI note number from a MusicXML <pitch> element."""
-    step = _STEP_SEMITONES[pitch.findtext("step")]
-    octave = int(pitch.findtext("octave"))
-    alter = int(float(pitch.findtext("alter") or 0))
-    return 12 * (octave + 1) + step + alter
+def _midi_pitch(pitch: ET.Element) -> int | None:
+    """MIDI note number from a MusicXML <pitch> element, None if unreadable.
+
+    A handful of GAPS scores carry a malformed pitch — a ``<step>`` holding
+    only whitespace, for instance. Those notes are dropped rather than
+    aborting the track, which would cost the whole recording over four bad
+    notes in several thousand.
+    """
+    step = _STEP_SEMITONES.get((pitch.findtext("step") or "").strip().upper())
+    octave = (pitch.findtext("octave") or "").strip()
+    if step is None or not octave.lstrip("-").isdigit():
+        return None
+    try:
+        alter = int(float((pitch.findtext("alter") or "0").strip() or 0))
+    except ValueError:
+        alter = 0
+    return 12 * (int(octave) + 1) + step + alter

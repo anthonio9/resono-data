@@ -20,3 +20,7 @@ htmlcov/
 
 # OS
 .DS_Store
+
+# Datasets: raw downloads, .npy caches and partition JSONs are all generated
+# by the pipeline and run to many gigabytes.
+data/

@@ -14,6 +14,7 @@ dependencies = [
     "torch",
     "soundfile",
     "librosa",
+    "huggingface-hub",
     "jams",
     "mido",
     "tqdm",

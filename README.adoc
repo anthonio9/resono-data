@@ -99,13 +99,44 @@ No single GAPS annotation is sufficient, so preprocessing combines three:
 | fine-aligned MIDI | per-note onset and offset in seconds | string — every note is on channel 0
 |===
 
-Onsets therefore come from the MIDI, string labels from the MusicXML tablature, and the syncpoints supply the measure-level time prior that links them. Interpolating onsets from syncpoints alone lands a median 215-434 ms from the MIDI's — 18 to 37 frames at a 256-sample hop — so the MIDI is what makes frame-accurate labels possible.
+Onsets therefore come from the MIDI, string labels from the MusicXML tablature, and the syncpoints supply the measure-level time prior that links them.
 
-Because the MIDI carries no string information, transferring the score's string labels onto performance timing requires an alignment step. Repeats are expanded first (performers take repeats the score writes once), and the syncpoint count cross-checks that expansion.
+Two questions come up every time, and both are settled by measurement:
+
+*"The MusicXML already has the strings — why involve the MIDI?"* Because MusicXML has no seconds, only measures and divisions. Interpolating onsets from syncpoints instead assumes the performer played metronomically within each bar; measured against the MIDI's real onsets that lands a median *215-434 ms* out, which is *18 to 37 frames* at a 256-sample hop. Only 0.3-6.2% of onsets fall within a single frame.
+
+*"Aren't the syncpoints per beat?"* No, per measure — a median 1.34 anchors per measure across the 300 tracks, and 1.20 for 4/4 pieces rather than 4.0. The GAPS paper says they aligned "at measure level ... so that any alignment errors would be localised to one measure".
+
+=== How the alignment works
+
+Because the MIDI carries no string information, the score's string labels have to be transferred onto performance timing. Repeats are unfolded first, since performers take repeats the score writes once.
+
+Neither obvious approach works alone. Matching by *note order* is defeated by repeats and, more stubbornly, by chord members having no canonical order on either side — an LCS, the theoretical ceiling for any order-based match, gets no further. Matching by *interpolated time* works well where syncpoints are dense and collapses where they are sparse.
+
+So the module combines them: a monotonic dynamic program in which a pair may match only if the pitches are equal and the MIDI onset lies within a tolerance of the score note's syncpoint-predicted time, with the reward decaying linearly in that time error. The syncpoints act as a prior that disambiguates between same-pitch candidates; the monotonicity prevents a note matching an identical pitch elsewhere in the piece. Both sequences are sorted by (time, pitch) first, which is what neutralises the chord-ordering problem.
+
+Notes left unmatched fall back to a heuristic: the lowest fret playable on a string not already sounding, using the tuning declared in the score.
+
+=== What actually survives
+
+Measured across all 300 split tracks:
+
+[cols="1,1,1,1"]
+|===
+| | Tracks | Median coverage | Mean
+
+| included | *214* | *98.0%* | 93.9%
+| excluded | *86* | 62.9% | 62.5%
+|===
+
+"Coverage" is the share of MIDI notes receiving a string from the score, so it measures completeness, not correctness — see the limitations below.
+
+Every exclusion comes from one cross-check: syncpoint indices are performed measure numbers, so they independently state how many measures exist, and on 86 tracks that disagrees with the score by more than one. The 28-point coverage gap is the reason to trust that check rather than treat it as arbitrary — it selects tracks that demonstrably align worse.
 
 === Known limitations
 
-* *String labels are approximate and unvalidated.* GAPS has no per-string ground truth, so their accuracy cannot be measured on this dataset. Roughly 6-9% of notes get no confident score match and fall back to a lowest-playable-fret heuristic. The dataset's own `.match` files pair only 18-28% of performed notes and are not a usable reference.
+* *About a quarter of GAPS is excluded by default.* On 86 of the 300 tracks the score and the syncpoints disagree on how many measures were performed, always with the syncpoints claiming more. Which side is wrong is unresolved. Those tracks align far worse than the rest (median coverage 62.9% against 98.0%), so they are dropped; `--keep-measure-mismatch` retains them for investigation. `manifest.json` in the cache records what was kept and why each of the rest was not.
+* *String labels are approximate and unvalidated.* GAPS has no per-string ground truth, so their accuracy cannot be measured on this dataset. On included tracks a median 2% of notes get no confident score match and fall back to a lowest-playable-fret heuristic; the spread is wide, and 13 included tracks still sit below 70% coverage for reasons that remain unexplained. The dataset's own `.match` files pair only 18-28% of performed notes and are not a usable reference.
 * *Offsets are the weakest labels.* The GAPS authors evaluate onsets only, without offsets, so note durations — and hence voiced-region ends — are less reliable than onsets.
 * *Pitch is piecewise constant.* Labels come from the score, so GAPS contains no bends or vibrato. It is detection data, not continuous-f0 data.
 * *The official test split leaks performers.* It is a random 90:10 split by piece; 12 performers appear in both train and test. Validation is carved out by performer, which fixes train/valid but not train/test.

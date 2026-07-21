@@ -161,3 +161,28 @@ def test_tuning_agrees_with_the_tablature(score_file):
     tuning = read_tuning(score_file)
     for note in read_score(score_file):
         assert tuning[note.string] + note.fret == note.pitch
+
+
+# ---------------------------------------------------------------------------
+# Malformed pitch
+# ---------------------------------------------------------------------------
+
+MALFORMED = """<score-partwise><part id="P1"><measure number="1">
+  <attributes><divisions>1</divisions>
+    <time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+  <note><pitch><step> </step><octave>4</octave></pitch><duration>1</duration>
+    <notations><technical><string>1</string><fret>0</fret></technical></notations>
+  </note>
+  <note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration>
+    <notations><technical><string>1</string><fret>0</fret></technical></notations>
+  </note>
+</measure></part></score-partwise>"""
+
+
+def test_malformed_pitch_drops_the_note_not_the_track(tmp_path):
+    # A few GAPS scores carry a <step> holding only whitespace. Losing the
+    # whole recording over one bad note in several thousand is the wrong trade.
+    path = tmp_path / "malformed.xml"
+    path.write_text(MALFORMED)
+    notes = read_score(path)
+    assert [note.pitch for note in notes] == [64]

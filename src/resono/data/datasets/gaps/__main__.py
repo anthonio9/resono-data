@@ -44,6 +44,7 @@ def main() -> None:
     pp.add_argument("--sample-rate", type=int,   default=22050)
     pp.add_argument("--hop-size",    type=int,   default=256)
     pp.add_argument("--tolerance",   type=float, default=2.0)
+    pp.add_argument("--keep-measure-mismatch", action="store_true", default=False)
     pp.add_argument("--no-progress-bar", dest="progress",
                     action="store_false", default=True)
 
@@ -63,6 +64,7 @@ def main() -> None:
         preprocess(
             args.raw_dir, args.cache_dir, args.sample_rate, args.hop_size,
             tolerance=args.tolerance,
+            keep_measure_mismatch=args.keep_measure_mismatch,
             progress=args.progress,
         )
     elif args.command == "partition":

@@ -11,6 +11,12 @@ from resono.data.datasets.gaps import score as score_reader
 from resono.data.datasets.gaps.align import align, assign_strings, predict_times
 from resono.data.datasets.gaps.download import GAPS_DIRNAME, read_track_ids
 
+MANIFEST_NAME = "manifest.json"
+
+
+class MeasureMismatch(ValueError):
+    """The score and the syncpoints disagree on how many measures were played."""
+
 
 def preprocess(
     raw_dir: Path,
@@ -18,6 +24,7 @@ def preprocess(
     sample_rate: int = 22050,
     hop_size: int = 256,
     tolerance: float = 2.0,
+    keep_measure_mismatch: bool = False,
     progress: bool = True,
 ) -> None:
     """Convert raw GAPS files to .npy cache.
@@ -38,12 +45,22 @@ def preprocess(
     fine-aligned MIDI's; string assignment is transferred from the MusicXML
     tablature by :mod:`resono.data.datasets.gaps.align` and is approximate.
 
+    Writes manifest.json alongside the arrays, recording which tracks were
+    cached and why each of the rest was not. About a quarter of GAPS is
+    excluded by default — see `keep_measure_mismatch` — so the record of what
+    was dropped is needed to investigate it later.
+
     Parameters
     ----------
     tolerance:
         Seconds of syncpoint-predicted timing error tolerated when matching a
         MIDI note to a score note. Larger values recover more notes on pieces
         with sparse syncpoints, at the cost of admitting looser matches.
+    keep_measure_mismatch:
+        Cache tracks whose score and syncpoints disagree on the measure count
+        (~28% of GAPS) instead of excluding them. Their labels may be shifted
+        against the audio, so this is off by default; turn it on to
+        investigate those tracks rather than to train on them.
     progress:
         Show a progress bar over tracks. Enabled by default; pass False (or
         --no-progress-bar on the CLI) to silence it.
@@ -59,16 +76,22 @@ def preprocess(
         )
 
     hop_seconds = hop_size / sample_rate
-    written = 0
+    included: list[str] = []
+    excluded: dict[str, str] = {}
 
     for track_id in tqdm(
         track_ids, desc="Preprocessing", unit="track", disable=not progress
     ):
         try:
             arrays = _preprocess_track(
-                gaps_root, track_id, sample_rate, hop_size, hop_seconds, tolerance
+                gaps_root, track_id, sample_rate, hop_size, hop_seconds, tolerance,
+                keep_measure_mismatch,
             )
+        except MeasureMismatch as error:
+            excluded[track_id] = f"measure mismatch: {error}"
+            continue
         except (FileNotFoundError, ValueError) as error:
+            excluded[track_id] = str(error)
             tqdm.write(f"  warning: skipping {track_id}: {error}")
             continue
 
@@ -77,9 +100,18 @@ def preprocess(
         np.save(out_dir / f"{track_id}-pitch.npy", pitch)
         np.save(out_dir / f"{track_id}-voiced.npy", voiced)
         np.save(out_dir / f"{track_id}-onset.npy", onset)
-        written += 1
+        included.append(track_id)
 
-    print(f"Preprocessed {written}/{len(track_ids)} tracks → {out_dir}")
+    manifest = out_dir / MANIFEST_NAME
+    with open(manifest, "w") as handle:
+        json.dump({"included": included, "excluded": excluded}, handle, indent=2)
+
+    mismatched = sum(1 for r in excluded.values() if r.startswith("measure mismatch"))
+    print(
+        f"Preprocessed {len(included)}/{len(track_ids)} tracks → {out_dir}\n"
+        f"  excluded {len(excluded)} ({mismatched} on measure mismatch); "
+        f"see {manifest}"
+    )
 
 
 def _preprocess_track(
@@ -89,6 +121,7 @@ def _preprocess_track(
     hop_size: int,
     hop_seconds: float,
     tolerance: float,
+    keep_measure_mismatch: bool,
 ):
     """Build the cache arrays for one track."""
     audio_path = gaps_root / "audio" / f"{track_id}.wav"
@@ -100,14 +133,9 @@ def _preprocess_track(
         if not path.exists():
             raise FileNotFoundError(f"missing {path.name}")
 
-    # --- audio: GAPS ships 48 kHz stereo ---
-    audio, source_rate = sf.read(audio_path)
-    if audio.ndim > 1:
-        audio = audio.mean(axis=1)
-    if source_rate != sample_rate:
-        audio = librosa.resample(audio, orig_sr=source_rate, target_sr=sample_rate)
-    audio = audio.astype(np.float32)
-
+    # Annotations are parsed and validated before the audio is decoded:
+    # resampling a 48 kHz stereo file is by far the most expensive step here,
+    # and about a quarter of tracks are disqualified on their annotations.
     # --- annotations ---
     midi_notes = midi_reader.read_notes(midi_path)
     score_notes = score_reader.read_score(score_path)
@@ -115,7 +143,11 @@ def _preprocess_track(
     if not midi_notes or not score_notes:
         raise ValueError("no notes in MIDI or score")
 
-    _check_unfolding(score_notes, syncpoints, track_id)
+    agree, performed, expected = _check_measures(score_notes, syncpoints)
+    if not agree and not keep_measure_mismatch:
+        raise MeasureMismatch(
+            f"score has {performed} measures, syncpoints describe {expected}"
+        )
 
     predicted = predict_times(score_notes, syncpoints)
     matches = align(midi_notes, score_notes, predicted, tolerance=tolerance)
@@ -126,29 +158,44 @@ def _preprocess_track(
     )
     strings, _from_score = assign_strings(midi_notes, score_notes, matches, tuning)
 
+    # --- audio: GAPS ships 48 kHz stereo ---
+    audio, source_rate = sf.read(audio_path)
+    if audio.ndim > 1:
+        audio = audio.mean(axis=1)
+    if source_rate != sample_rate:
+        audio = librosa.resample(audio, orig_sr=source_rate, target_sr=sample_rate)
+    audio = audio.astype(np.float32)
+
     n_frames = len(audio) // hop_size
     pitch, voiced, onset = _rasterise(midi_notes, strings, n_frames, hop_seconds)
     return audio, pitch, voiced, onset
 
 
-def _check_unfolding(score_notes, syncpoints, track_id: str) -> None:
-    """Warn when repeat unfolding disagrees with the syncpoint measure count.
+def _check_measures(score_notes, syncpoints) -> tuple[bool, int, int]:
+    """Compare the score's measure count against the syncpoints'.
 
     Syncpoint indices are performed measure numbers, so they independently
-    state how many measures the performance contains. A mismatch means the
-    repeat structure was expanded wrongly — the labels would then be shifted
-    against the audio, which is worth surfacing rather than silently shipping.
+    state how many measures the performance contains. On roughly 28% of GAPS
+    the two disagree, and always with the syncpoints claiming more — the
+    score, as encoded, does not account for the performed length. Which side
+    is wrong is unresolved: candidates are repeats the performer took but the
+    score does not mark, the anacrusis handling the GAPS paper lists as a
+    known open issue, and syncpoint indices not meaning performed-measure in
+    every file.
+
+    It matters because the syncpoints are what map score positions onto
+    seconds. If that mapping is wrong the time prior is wrong, and those
+    tracks do in fact align worst. So a mismatch disqualifies the track by
+    default rather than shipping labels that may be shifted against audio.
+
+    Returns (agree, performed measures, measures the syncpoints describe).
     """
     performed = max(note.measure for note in score_notes) + 1
     indices = [point[0] for point in syncpoints if len(point) >= 2]
     if not indices:
-        return
+        return True, performed, performed
     expected = max(indices) + 1
-    if abs(performed - expected) > 1:
-        tqdm.write(
-            f"  warning: {track_id} unfolds to {performed} measures but the "
-            f"syncpoints describe {expected}; repeats may be misread"
-        )
+    return abs(performed - expected) <= 1, performed, expected
 
 
 def _rasterise(
