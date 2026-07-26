@@ -28,6 +28,7 @@ def preprocess(
         {stem}-audio.npy   float32  (N_samples,)
         {stem}-pitch.npy   float32  (6, N_frames)   Hz, 0 = unvoiced
         {stem}-voiced.npy  bool     (6, N_frames)
+        {stem}-onset.npy   bool     (6, N_frames)   True on note-start frames
 
     Parameters
     ----------
@@ -82,6 +83,14 @@ def preprocess(
         jam = jams.load(str(jams_file))
         n_frames = len(audio) // hop_size
         pitch, voiced, note_ids = extract_pitch_note_arrays_jams(jam, hop_s, n_frames)
+        # Onsets from note_ids (distinct id per note, -1 unvoiced): the first
+        # frame of every note, including a re-struck same-pitch note (a new id
+        # with no voicing gap) that a voiced 0->1 derivation misses (~22% of
+        # GuitarSet onsets). Note starts are unaffected by overhang tail removal,
+        # so this is computed from the pristine note_ids before that trim.
+        onset = np.zeros_like(voiced, dtype=bool)
+        onset[:, 0] = note_ids[:, 0] != -1
+        onset[:, 1:] = (note_ids[:, 1:] != note_ids[:, :-1]) & (note_ids[:, 1:] != -1)
         if remove_overhangs:
             pitch, voiced = remove_pitch_overhangs(
                 pitch, voiced, note_ids,
@@ -89,6 +98,7 @@ def preprocess(
             )
         np.save(out_dir / f"{stem}-pitch.npy",  pitch)
         np.save(out_dir / f"{stem}-voiced.npy", voiced)
+        np.save(out_dir / f"{stem}-onset.npy",  onset)
 
     print(f"Preprocessed {len(audio_files)} tracks → {out_dir}")
 

@@ -10,10 +10,11 @@ from torch.utils.data import Dataset as TorchDataset
 class Dataset(TorchDataset):
     """Memory-mapped dataset over one or more preprocessed .npy caches.
 
-    Each preprocessed track contributes three files in cache_dir/{dataset}/:
+    Each preprocessed track contributes these files in cache_dir/{dataset}/:
         {stem}-audio.npy   float32  (N_samples,)
         {stem}-pitch.npy   float32  (6, N_frames) or (N_frames,)
         {stem}-voiced.npy  bool     same shape as pitch
+        {stem}-onset.npy   bool     same shape as pitch (True on note starts)
 
     Items are fixed-size chunks of consecutive frames. The sampler controls
     which chunks are drawn and in what order — __getitem__ just loads whatever
@@ -152,6 +153,7 @@ class Dataset(TorchDataset):
                 "audio":  np.load(f"{prefix}-audio.npy",  mmap_mode="r"),
                 "pitch":  np.load(f"{prefix}-pitch.npy",  mmap_mode="r"),
                 "voiced": np.load(f"{prefix}-voiced.npy", mmap_mode="r"),
+                "onset":  np.load(f"{prefix}-onset.npy",  mmap_mode="r"),
             }
             self._cache[key] = arrays
         return arrays
@@ -165,31 +167,36 @@ class Dataset(TorchDataset):
         H = self.hop_size
 
         arrays = self._get_arrays(prefix)
-        pitch, voiced, audio = arrays["pitch"], arrays["voiced"], arrays["audio"]
+        pitch, voiced, onset, audio = (
+            arrays["pitch"], arrays["voiced"], arrays["onset"], arrays["audio"])
 
         end_frame = frame + W
 
         if end_frame <= n_frames:
-            pitch_s  = np.array(pitch[...,  frame:end_frame])
-            voiced_s = np.array(voiced[..., frame:end_frame])
-            audio_s  = np.array(audio[frame * H : end_frame * H])
+            pitch_slice  = np.array(pitch[...,  frame:end_frame])
+            voiced_slice = np.array(voiced[..., frame:end_frame])
+            onset_slice  = np.array(onset[...,  frame:end_frame])
+            audio_slice  = np.array(audio[frame * H : end_frame * H])
         else:
             # Window extends past the track end: zero-pad the tail so that
             # boundary frames (including track onsets when context < window)
             # are seen during training. Audio is clipped to the frame grid
             # (n_frames * H) first — the raw file may carry up to H-1 extra
             # samples that must not leak into the fixed-size window.
-            pad_f    = end_frame - n_frames
-            p        = np.array(pitch[...,  frame:])
-            v        = np.array(voiced[..., frame:])
-            a        = np.array(audio[frame * H : n_frames * H])
-            pitch_s  = np.concatenate([p, np.zeros((*p.shape[:-1], pad_f), dtype=np.float32)], axis=-1)
-            voiced_s = np.concatenate([v, np.zeros((*v.shape[:-1], pad_f), dtype=bool)],       axis=-1)
-            audio_s  = np.concatenate([a, np.zeros(pad_f * H,              dtype=np.float32)])
+            pad_frames    = end_frame - n_frames
+            pitch_avail   = np.array(pitch[...,  frame:])
+            voiced_avail  = np.array(voiced[..., frame:])
+            onset_avail   = np.array(onset[...,  frame:])
+            audio_avail   = np.array(audio[frame * H : n_frames * H])
+            pitch_slice   = np.concatenate([pitch_avail,  np.zeros((*pitch_avail.shape[:-1],  pad_frames), dtype=np.float32)], axis=-1)
+            voiced_slice  = np.concatenate([voiced_avail, np.zeros((*voiced_avail.shape[:-1], pad_frames), dtype=bool)],       axis=-1)
+            onset_slice   = np.concatenate([onset_avail,  np.zeros((*onset_avail.shape[:-1],  pad_frames), dtype=bool)],       axis=-1)
+            audio_slice   = np.concatenate([audio_avail,  np.zeros(pad_frames * H,                         dtype=np.float32)])
 
         return {
-            "audio":  torch.from_numpy(audio_s).float(),
-            "pitch":  torch.from_numpy(pitch_s).float(),
-            "voiced": torch.from_numpy(voiced_s),
+            "audio":  torch.from_numpy(audio_slice).float(),
+            "pitch":  torch.from_numpy(pitch_slice).float(),
+            "voiced": torch.from_numpy(voiced_slice),
+            "onset":  torch.from_numpy(onset_slice),
             "stem":   stem,
         }
