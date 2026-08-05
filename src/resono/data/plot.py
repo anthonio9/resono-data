@@ -24,11 +24,13 @@ _INK = {
     "light": {
         "surface": "#fcfcfb", "primary": "#0b0b0b", "secondary": "#52514e",
         "muted": "#8a8880", "pitch": "#2a78d6", "onset": "#eb6834",
+        "compare": "#8a8880", "changed": "#eb6834",
         "spectrogram": "Greys",
     },
     "dark": {
         "surface": "#1a1a19", "primary": "#ffffff", "secondary": "#c3c2b7",
         "muted": "#75736a", "pitch": "#3987e5", "onset": "#d95926",
+        "compare": "#9a988d", "changed": "#d95926",
         "spectrogram": "gray",
     },
 }
@@ -78,6 +80,8 @@ def plot_track(
     hop_size: int = 256,
     theme: str = "light",
     output: Path | None = None,
+    compare_dataset: str | None = None,
+    compare_cache_dir: Path | None = None,
 ):
     """Plot labels over audio for one track and return the figure.
 
@@ -90,6 +94,13 @@ def plot_track(
     theme:
         'light' or 'dark'. Both are selected against their own surface rather
         than one being an inversion of the other.
+    compare_dataset, compare_cache_dir:
+        Draw a second set of labels for the same stem underneath the first, to
+        see what a relabelling actually did. The comparison is drawn recessive
+        — thin and dashed — because the question being asked is what changed,
+        not what the old labels were; frames whose voicing differs are marked
+        so a moved note boundary is visible even where the two contours agree.
+        Defaults to the same cache_dir when only compare_dataset is given.
     """
     import matplotlib.pyplot as plt
     import librosa
@@ -101,6 +112,10 @@ def plot_track(
     track = load_track(cache_dir, dataset, stem)
     audio, pitch, voiced = track["audio"], track["pitch"], track["voiced"]
     onset = track["onset"]
+
+    compare = None
+    if compare_dataset is not None:
+        compare = load_track(compare_cache_dir or cache_dir, compare_dataset, stem)
 
     # Frame f starts at sample f * hop_size — the loader's convention, and the
     # only thing tying labels to audio. Slicing both from the same frame
@@ -122,6 +137,14 @@ def plot_track(
     onset_win = np.atleast_2d(onset)[:, first:last] if onset is not None else None
     n_strings = pitch_win.shape[0]
 
+    compare_pitch = compare_voiced = None
+    if compare is not None:
+        # The two caches can differ in length by a frame; compare only where
+        # both have data rather than letting a ragged edge raise.
+        end = min(last, compare["pitch"].shape[-1])
+        compare_pitch = np.atleast_2d(compare["pitch"])[:, first:end]
+        compare_voiced = np.atleast_2d(compare["voiced"])[:, first:end]
+
     figure, (top, bottom) = plt.subplots(
         2, 1, figsize=(13, 7.5), height_ratios=[3, 2], sharex=True,
         gridspec_kw={"hspace": 0.12},
@@ -131,13 +154,19 @@ def plot_track(
     _plot_spectrogram(
         top, clip, pitch_win, voiced_win, onset_win, times,
         sample_rate, hop_size, start, ink,
+        compare_pitch, compare_voiced, compare_dataset,
     )
-    _plot_string_lanes(bottom, pitch_win, voiced_win, onset_win, times, ink)
+    _plot_string_lanes(
+        bottom, pitch_win, voiced_win, onset_win, times, ink, compare_voiced
+    )
 
     voiced_pct = voiced_win.any(axis=0).mean()
     onsets = "" if onset_win is not None else "  ·  no onset labels in this cache"
+    title = f"{dataset} · {stem}"
+    if compare_dataset is not None:
+        title += f"   vs {compare_dataset}"
     top.set_title(
-        f"{dataset} · {stem}   {start:.1f}–{start + duration:.1f}s   "
+        f"{title}   {start:.1f}–{start + duration:.1f}s   "
         f"labelled pitch over CQT   ({voiced_pct:.0%} of frames voiced){onsets}",
         color=ink["primary"], fontsize=12, loc="left", pad=12,
     )
@@ -157,6 +186,7 @@ def plot_track(
 def _plot_spectrogram(
     axes, clip, pitch_win, voiced_win, onset_win, times,
     sample_rate, hop_size, start, ink,
+    compare_pitch=None, compare_voiced=None, compare_dataset=None,
 ):
     """CQT with the labelled pitch drawn over it."""
     import librosa
@@ -180,6 +210,21 @@ def _plot_spectrogram(
         decibels[:, :frames],
         cmap=ink["spectrogram"], vmin=-60, vmax=0, shading="nearest", rasterized=True,
     )
+
+    # The comparison goes down first and stays thin, so where the two agree it
+    # reads as a shadow under the current labels rather than competing with
+    # them; where they diverge, both are legible.
+    if compare_pitch is not None:
+        compare_times = times[: compare_pitch.shape[-1]]
+        for string in range(compare_pitch.shape[0]):
+            series = np.where(
+                compare_voiced[string], compare_pitch[string], np.nan
+            )
+            axes.plot(
+                compare_times, series, color=ink["compare"], linewidth=3.2,
+                linestyle=(0, (1, 1.4)), solid_capstyle="round", zorder=2,
+                label=compare_dataset if string == 0 else None,
+            )
 
     # Break the contour at unvoiced frames so rests are not bridged by a line
     # that implies a sounding note.
@@ -211,7 +256,7 @@ def _plot_spectrogram(
 
     # One series is named by the title; a legend earns its space only once
     # there are two kinds of mark to tell apart.
-    if marked:
+    if marked or compare_pitch is not None:
         legend = axes.legend(
             loc="upper right", frameon=True, fontsize=9,
             facecolor=ink["surface"], edgecolor=ink["muted"],
@@ -220,7 +265,9 @@ def _plot_spectrogram(
             text.set_color(ink["secondary"])
 
 
-def _plot_string_lanes(axes, pitch_win, voiced_win, onset_win, times, ink):
+def _plot_string_lanes(
+    axes, pitch_win, voiced_win, onset_win, times, ink, compare_voiced=None
+):
     """One labelled lane per string: where it sounds, and at what pitch."""
     n_strings = pitch_win.shape[0]
     step = times[1] - times[0] if len(times) > 1 else 0.01
@@ -228,6 +275,22 @@ def _plot_string_lanes(axes, pitch_win, voiced_win, onset_win, times, ink):
     for string in range(n_strings):
         lane = n_strings - 1 - string          # index 0 (low E) at the bottom
         active = voiced_win[string]
+
+        # Frames the two caches disagree about, drawn as a thin band below the
+        # lane. Trimmed and extended note ends are a few frames each and would
+        # be invisible in the pitch contour above; this is where a moved note
+        # boundary actually shows up.
+        if compare_voiced is not None:
+            n = compare_voiced.shape[-1]
+            differs = np.zeros(active.shape, dtype=bool)
+            differs[:n] = active[:n] != compare_voiced[string]
+            if differs.any():
+                axes.bar(
+                    times[differs], np.full(differs.sum(), 0.12),
+                    width=step, bottom=lane - 0.42,
+                    color=ink["changed"], edgecolor="none", zorder=4,
+                )
+
         if active.any():
             # Constant height: this panel answers "which string, when".
             # Encoding pitch as bar height would not be comparable between

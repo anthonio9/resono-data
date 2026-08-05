@@ -155,3 +155,51 @@ def test_cv_folds_all_players_appear_as_test(tmp_path):
             test_players.add(stem[:2])
 
     assert test_players == {"00", "01", "02", "03", "04", "05"}
+
+
+# ---------------------------------------------------------------------------
+# name= — sharing this split with GuitarSet-derived datasets
+# ---------------------------------------------------------------------------
+
+def test_name_selects_cache_dir_and_output_file(tmp_path):
+    """A derived dataset splits through the same code, under its own name.
+
+    reguitarset holds the same tracks under the same stems, so it must be split
+    identically for any comparison against guitarset to mean anything. That is
+    what this parameter is for; a second implementation would drift.
+    """
+    stems = [f"{p:02d}_track_{i:02d}" for p in range(6) for i in range(10)]
+
+    cache_dir = tmp_path / "cache"
+    (cache_dir / "reguitarset").mkdir(parents=True)
+    for stem in stems:
+        np.save(cache_dir / "reguitarset" / f"{stem}-audio.npy",
+                np.zeros(256, dtype=np.float32))
+
+    partitions_dir = tmp_path / "partitions"
+    partitions_dir.mkdir()
+
+    partition(cache_dir, partitions_dir, name="reguitarset")
+    cv_folds(cache_dir, partitions_dir, name="reguitarset")
+
+    assert (partitions_dir / "reguitarset.json").exists()
+    assert not (partitions_dir / "guitarset.json").exists()
+    for fold in range(6):
+        assert (partitions_dir / f"reguitarset_fold{fold}.json").exists()
+
+
+def test_name_default_matches_an_explicit_guitarset(tmp_path):
+    """The default is inert: omitting name= is the same as passing 'guitarset'."""
+    stems = [f"{p:02d}_track_{i:02d}" for p in range(6) for i in range(10)]
+    cache_dir = _make_cache(tmp_path, stems)
+
+    default = tmp_path / "default"
+    explicit = tmp_path / "explicit"
+    default.mkdir()
+    explicit.mkdir()
+
+    partition(cache_dir, default)
+    partition(cache_dir, explicit, name="guitarset")
+
+    with open(default / "guitarset.json") as f:
+        assert json.load(f) == json.load(open(explicit / "guitarset.json"))

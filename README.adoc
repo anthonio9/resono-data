@@ -73,6 +73,46 @@ Writes six `guitarset_fold{0-5}.json` files, each rotating a different player in
 python -m resono.data.datasets.guitarset cv-folds
 ----
 
+=== String ordering
+
+Hex channel `c` carries string `c`, low E first — the same order as the JAMS `pitch_contour` annotations and as resono's own string axis.
+
+*This is stated nowhere upstream*: not in the filenames (one 6-channel wav per track), the Zenodo record, the GuitarSet website, the ISMIR paper, or the JAMS metadata (which labels the six annotations only `'0'`–`'5'`).
+It was established by measurement, and the pipeline hardcodes the result.
+
+The annotation side is inferable from the data: the six annotations' notes start at MIDI 44, 51, 58, 62, 65, 72 — each at or above its open-string pitch (E2=40, A2=45, D3=50, G3=55, B3=59, E4=64), so index 0 is the low E.
+The paper's Figure 1 legend agrees, reading `E — A — D — G — B — e`.
+
+The audio side was measured directly.
+For each track, for every frame the annotation marks string `s` voiced at frequency `f`, the CQT magnitude of each channel at `f` was compared across channels; the loudest channel is that string's.
+Across 24 tracks spanning all six players and four genres, 19 gave the identity on every measurable string.
+The five exceptions were all the same artefact, not a reordering: string 5 mapping to channel 2 on tracks where the high e plays exactly an octave above the D string (86% of shared frames within 30 cents of 1200), so the D string's 2nd harmonic lands on the high e's fundamental and outweighs it.
+Those results are also not permutations — channel 2 claims two strings at once — which is the signature of a confused measurement rather than a genuine channel swap.
+
+Since GuitarSet is a frozen Zenodo record, this cannot change, so no runtime check is kept.
+
+=== Sharp keys: `#` is renamed to `sharp` on extraction
+
+GuitarSet track IDs encode the key, and 48 of the 360 tracks are in a sharp key — `00_Funk3-112-C#_comp`.
+
+That `#` is hostile to tooling. Kaggle rejects it in filenames outright, so re-hosted copies of these archives circulate with `Csharp` instead of `C#`.
+A raw tree assembled from a mixture of the two spellings is the dangerous case: the pipeline joins audio to annotations by filename, and a track whose spellings disagree simply never appears in the index.
+It is dropped with no error at all.
+
+Every archive is therefore unpacked through `guitarset.download.extract_and_rename_sharp()`, which rewrites `#` to `sharp` in member names as it writes them.
+Both `guitarset` and `reguitarset` extract this way, so the on-disk layout is self-consistent whatever spelling an archive arrived with, and nothing downstream needs to know the discrepancy exists.
+
+If you have a raw tree from before this was in place, rename the stragglers once:
+
+[source,bash]
+----
+python -c "
+from pathlib import Path
+for p in Path('data/raw/guitarset').rglob('*#*'):
+    p.rename(p.with_name(p.name.replace('#', 'sharp')))
+"
+----
+
 == GAPS pipeline
 
 14 hours of classical (nylon-string) guitar, 300 performances by 200+ performers, labelled from aligned scores rather than from a pickup.

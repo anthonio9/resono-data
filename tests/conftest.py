@@ -25,6 +25,10 @@ def fake_dataset(tmp_path):
 
     Voiced pattern per track: first half voiced, second half silent.
     This guarantees both voiced_idx and onset_idx are non-empty.
+
+    Every track carries all four cache arrays, onset included — Dataset loads
+    it unconditionally, so a fixture without it is not a cache the loader can
+    read.
     """
     rng = np.random.default_rng(0)
 
@@ -49,6 +53,7 @@ def fake_dataset(tmp_path):
 
         pitch  = np.zeros((N_STRINGS, n_frames), dtype=np.float32)
         voiced = np.zeros((N_STRINGS, n_frames), dtype=bool)
+        onset  = np.zeros((N_STRINGS, n_frames), dtype=bool)
 
         # First half is voiced with realistic guitar frequencies.
         half = n_frames // 2
@@ -56,10 +61,12 @@ def fake_dataset(tmp_path):
         for s, f in enumerate(freqs):
             pitch[s,  :half] = f
             voiced[s, :half] = True
+            onset[s, 0] = True
 
         np.save(cache_dir / f"{stem}-audio.npy",  audio)
         np.save(cache_dir / f"{stem}-pitch.npy",  pitch)
         np.save(cache_dir / f"{stem}-voiced.npy", voiced)
+        np.save(cache_dir / f"{stem}-onset.npy",  onset)
 
     stems = [s for s, _ in tracks]
     partition = {

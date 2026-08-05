@@ -10,9 +10,19 @@ Each dataset exposes its own pipeline under resono.data.datasets.<name>:
     python -m resono.data.datasets.gaps preprocess
     python -m resono.data.datasets.gaps partition
 
+    python -m resono.data.datasets.reguitarset download
+    python -m resono.data.datasets.reguitarset verify-hex
+    python -m resono.data.datasets.reguitarset track-f0
+    python -m resono.data.datasets.reguitarset preprocess
+    python -m resono.data.datasets.reguitarset partition
+
 Inspect preprocessed labels against the audio they describe (any dataset):
     python -m resono.data plot --list-stems
     python -m resono.data plot --dataset gaps --stem 001_mvswc --start 40
+
+Compare two datasets' labels for the same track, to see what a relabelling did:
+    python -m resono.data plot --dataset reguitarset --compare-dataset guitarset \\
+        --stem 05_Rock1-90-C_solo --start 12.4
 """
 import argparse
 import sys
@@ -42,6 +52,10 @@ def main() -> None:
     parser.add_argument("--theme",       choices=["light", "dark"], default="light")
     parser.add_argument("--output",      type=Path,  default=None,
                         help="Write a PNG here instead of opening a window")
+    parser.add_argument("--compare-dataset", default=None,
+                        help="Overlay this dataset's labels for the same stem")
+    parser.add_argument("--compare-cache-dir", type=Path, default=None,
+                        help="Cache root for --compare-dataset (default: --cache-dir)")
     args = parser.parse_args()
 
     # A missing cache is ordinary user error, not a crash: report it as one
@@ -59,6 +73,8 @@ def main() -> None:
             start=args.start, duration=args.duration,
             sample_rate=args.sample_rate, hop_size=args.hop_size,
             theme=args.theme, output=args.output,
+            compare_dataset=args.compare_dataset,
+            compare_cache_dir=args.compare_cache_dir,
         )
     except (FileNotFoundError, ValueError) as error:
         sys.exit(f"error: {error}")

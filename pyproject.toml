@@ -23,6 +23,10 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest"]
 viz = ["matplotlib"]
+# Upstream penn, which ships FCNF0++ and fetches its weights from HuggingFace
+# on first use. Only reguitarset's track-f0 step needs it, and that step runs
+# once, so it stays out of the base install.
+relabel = ["penn>=1.0.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

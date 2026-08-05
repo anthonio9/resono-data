@@ -1,3 +1,4 @@
+import shutil
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -42,8 +43,32 @@ def download(raw_dir: Path, progress: bool = True) -> None:
         out_dir = dest / filename.replace(".zip", "")
         if not out_dir.exists():
             print(f"Extracting {filename} …")
-            with zipfile.ZipFile(archive) as zf:
-                zf.extractall(out_dir)
+            extract_and_rename_sharp(archive, out_dir)
+
+
+def extract_and_rename_sharp(archive: Path, out_dir: Path) -> None:
+    """Unpack an archive, rewriting '#' to 'sharp' in member names.
+
+    GuitarSet track IDs encode the key, and 48 of the 360 tracks are in a sharp
+    key — ``00_Funk3-112-C#_comp``. That '#' is hostile to tooling: Kaggle
+    rejects it in filenames outright, which is why re-hosted copies of these
+    archives circulate with 'Csharp' instead. A raw tree assembled from a
+    mixture of the two spellings joins across archives by filename and silently
+    drops every sharp-key track, because the missing ones never appear in the
+    index rather than raising.
+
+    Applying the substitution here — at the one point that writes these files —
+    makes the on-disk layout self-consistent whatever spelling an archive
+    arrived with, so nothing downstream needs to know the discrepancy exists.
+    """
+    with zipfile.ZipFile(archive) as zf:
+        for member in zf.infolist():
+            if member.is_dir():
+                continue
+            target = out_dir / member.filename.replace("#", "sharp")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(member) as source, open(target, "wb") as destination:
+                shutil.copyfileobj(source, destination)
 
 
 def _download_file(url: str, dest: Path, label: str, progress: bool) -> None:

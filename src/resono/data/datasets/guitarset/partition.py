@@ -11,6 +11,7 @@ def partition(
     val_players: list[str] | None = None,
     test_players: list[str] | None = None,
     seed: int = 42,
+    name: str = "guitarset",
 ) -> None:
     """Write train/valid/test split JSON for GuitarSet.
 
@@ -19,6 +20,16 @@ def partition(
 
     The stem for each track is its track ID (e.g. '00_BN1-129-Eb_solo'),
     derived by stripping the '_mic' suffix from the audio filename.
+
+    Parameters
+    ----------
+    name:
+        Dataset name, used both for the cache subdirectory and the output JSON
+        filename. Exists so that GuitarSet-derived datasets — relabelled
+        variants that share these stems and this player numbering — can reuse
+        this split rather than copy it: two datasets are only comparable if
+        they are split identically, which a duplicate implementation cannot
+        guarantee over time.
     """
     # GuitarSet has 6 players (IDs '00'–'05'), each contributing 60 tracks
     # (6 chord types × 5 styles × 2 tempos). Assigning the last two players
@@ -30,7 +41,7 @@ def partition(
     if test_players is None:
         test_players = ["05"]
 
-    gset_cache = Path(cache_dir) / "guitarset"
+    gset_cache = Path(cache_dir) / name
     stems = sorted(
         p.stem[:-6]                          # strip '-audio' (6 chars)
         for p in gset_cache.glob("*-audio.npy")
@@ -65,7 +76,7 @@ def partition(
     }
 
     Path(partitions_dir).mkdir(parents=True, exist_ok=True)
-    out = Path(partitions_dir) / "guitarset.json"
+    out = Path(partitions_dir) / f"{name}.json"
     with open(out, "w") as f:
         json.dump(result, f, indent=2)
 
@@ -78,6 +89,7 @@ def partition(
 def cv_folds(
     cache_dir: Path,
     partitions_dir: Path,
+    name: str = "guitarset",
 ) -> None:
     """Write one partition JSON per 6-fold cross-validation rotation.
 
@@ -86,12 +98,13 @@ def cv_folds(
     protocol. This removes the variance introduced by any single fixed
     choice of val/test players and lets you average metrics across all folds.
 
-    Writes guitarset_fold0.json … guitarset_fold5.json to partitions_dir.
-    These are independent of the default guitarset.json produced by partition().
+    Writes {name}_fold0.json … {name}_fold5.json to partitions_dir. These are
+    independent of the default {name}.json produced by partition(). See
+    :func:`partition` for what ``name`` is for.
     """
     all_players = ["00", "01", "02", "03", "04", "05"]
 
-    gset_cache = Path(cache_dir) / "guitarset"
+    gset_cache = Path(cache_dir) / name
     stems = sorted(
         p.stem[:-6]
         for p in gset_cache.glob("*-audio.npy")
@@ -120,7 +133,7 @@ def cv_folds(
         )
 
         result = {"train": train, "valid": valid, "test": test}
-        out = Path(partitions_dir) / f"guitarset_fold{fold}.json"
+        out = Path(partitions_dir) / f"{name}_fold{fold}.json"
         with open(out, "w") as f:
             json.dump(result, f, indent=2)
 
