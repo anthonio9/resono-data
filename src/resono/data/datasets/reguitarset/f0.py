@@ -10,6 +10,9 @@ penn fetches the released weights from HuggingFace on first use, so there is no
 checkpoint path to keep in sync.
 """
 import json
+import os
+from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import get_context
 from pathlib import Path
 
 import numpy as np
@@ -36,9 +39,11 @@ def track_f0(
     f0_dir: Path,
     sample_rate: int = NATIVE_SAMPLE_RATE,
     hop_size: int = NATIVE_HOP_SIZE,
-    batch_size: int = 2048,
+    batch_size: int = 128,
     gpu: int | None = None,
     limit: int | None = None,
+    workers: int = 3,
+    overwrite: bool = False,
     progress: bool = True,
 ) -> None:
     """Estimate per-string F0 and periodicity, and cache them.
@@ -55,14 +60,28 @@ def track_f0(
         will be written to: frame f is centred at f * hop_size / sample_rate
         seconds. Defaults are GuitarSet's native 5.805 ms.
     batch_size:
-        Frames per forward pass. Bounds peak memory; does not affect results.
+        Frames per forward pass. Bounds peak memory and does not affect
+        results. Measured on one 22 s channel: runtime is flat across
+        128/512/2048 (56.7/56.5/56.8 s) while peak RSS scales linearly
+        (0.67/1.38/4.21 GB). Large batches therefore buy nothing and cost the
+        headroom that makes ``workers`` possible, so the default is small.
     limit:
         Process only the first N tracks. Use this to measure throughput before
         committing to a full run — inference is per-frame, so cost scales
         linearly with track count and inversely with hop size.
+    workers:
+        Tracks to process concurrently, each pinned to one torch thread.
+        The forward pass does not get faster with more torch threads
+        (measured: 30.4-30.8 s at 1, 4 and 8), so the only parallelism
+        available is across tracks — and it saturates quickly, because the
+        work is memory-bound rather than compute-bound: 36.9 s per channel
+        sequentially, 21.8 s at 3 workers, 21.2 s at 6. Default 3 takes
+        nearly all of the available gain for ~2 GB. ``0`` means one per CPU,
+        which on a small machine will thrash rather than help.
+    overwrite:
+        Recompute tracks that already have output. Off by default, which makes
+        the command resumable: an interrupted run continues where it stopped.
     """
-    import penn
-    import torch
     from tqdm import tqdm
 
     hex_root = Path(raw_dir) / "guitarset" / HEX_DIRNAME
@@ -82,53 +101,124 @@ def track_f0(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     bounds = string_frequency_bounds()
-    hop_seconds = hop_size / sample_rate
     _write_config(out_dir, sample_rate, hop_size, bounds)
 
-    for stem in tqdm(stems, desc="Tracking F0", unit="track", disable=not progress):
-        audio, sr = load_hex(paths[stem])
+    if not overwrite:
+        done = [s for s in stems if _is_done(out_dir, s)]
+        stems = [s for s in stems if s not in set(done)]
+        if done:
+            print(f"Skipping {len(done)} tracks already in {out_dir}")
+    if not stems:
+        print("Nothing to do — every track is already tracked.")
+        return
 
-        # The frame count the cache will have. penn resamples internally, so
-        # feed it the native audio and reconcile lengths against this.
-        n_frames = int(len(audio[0]) * sample_rate / sr) // hop_size
+    if workers == 0:
+        workers = os.cpu_count() or 1
+    jobs = [
+        (paths[stem], out_dir, sample_rate, hop_size, batch_size, bounds, gpu,
+         1 if workers > 1 else torch_threads())
+        for stem in stems
+    ]
 
-        f0 = np.zeros((N_STRINGS, n_frames), dtype=np.float32)
-        periodicity = np.zeros((N_STRINGS, n_frames), dtype=np.float32)
+    if workers > 1:
+        # 'spawn' rather than fork: torch and its thread pools do not survive
+        # being forked mid-flight, and a worker that deadlocks on import is
+        # far harder to diagnose than the second of interpreter startup this
+        # costs against a job measured in hours.
+        with ProcessPoolExecutor(
+            max_workers=workers, mp_context=get_context("spawn")
+        ) as pool:
+            for _ in tqdm(
+                pool.map(_track_one, jobs), total=len(jobs),
+                desc="Tracking F0", unit="track", disable=not progress,
+            ):
+                pass
+    else:
+        for job in tqdm(
+            jobs, desc="Tracking F0", unit="track", disable=not progress
+        ):
+            _track_one(job)
 
-        # Channel c carries string c. Nothing upstream documents this — it was
-        # established by measurement; see 'String ordering' in README.adoc for
-        # the evidence. It is the assumption the whole dataset rests on, since
-        # relabel.py then rewrites string s from row s.
-        for s, channel in enumerate(audio):
-            fmin, fmax = bounds[s]
-            pitch, period = penn.from_audio(
-                torch.from_numpy(channel)[None],
-                sample_rate=sr,
-                hopsize=hop_seconds,
-                fmin=fmin,
-                fmax=fmax,
-                checkpoint=None,
-                batch_size=batch_size,
-                # 'zero' pads half a window on both sides, putting frame i's
-                # centre at exactly i * hopsize. penn's default 'half-window'
-                # pads nothing, which shifts every estimate late by half a
-                # window — 64 ms — against the grid the labels sit on.
-                center="zero",
-                # penn 1.0.0 already defaults to this, but the relabelling
-                # downstream leans on it: with Viterbi doing the smoothing,
-                # relabel.py only has to fold octaves, and applies no
-                # smoothing of its own. Stated explicitly so a future change
-                # to penn's default cannot quietly remove that step.
-                decoder="viterbi",
-                gpu=gpu,
-            )
-            f0[s]          = _fit(pitch[0].cpu().numpy(), n_frames)
-            periodicity[s] = _fit(period[0].cpu().numpy(), n_frames)
+    print(f"Tracked {len(stems)} tracks → {out_dir}")
 
-        np.save(out_dir / f"{stem}-f0.npy", f0)
-        np.save(out_dir / f"{stem}-periodicity.npy", periodicity)
 
-    print(f"Tracked {len(hex_files)} tracks → {out_dir}")
+def _is_done(out_dir: Path, stem: str) -> bool:
+    """Has this track already been tracked?
+
+    Both files must exist: a run killed between the two saves would otherwise
+    look complete and leave the periodicity missing.
+    """
+    return (
+        (out_dir / f"{stem}-f0.npy").exists()
+        and (out_dir / f"{stem}-periodicity.npy").exists()
+    )
+
+
+def torch_threads() -> int:
+    """Torch's own default thread count, for the single-worker path."""
+    import torch
+
+    return torch.get_num_threads()
+
+
+def _track_one(job) -> str:
+    """Track one file's six channels and save them.
+
+    Module level, and taking a single plain tuple, because 'spawn' has to
+    pickle both this function and its argument.
+    """
+    import penn
+    import torch
+
+    (path, out_dir, sample_rate, hop_size, batch_size, bounds, gpu, threads) = job
+    torch.set_num_threads(threads)
+
+    stem = path.name[: -len(HEX_SUFFIX)]
+    audio, sr = load_hex(path)
+    hop_seconds = hop_size / sample_rate
+
+    # The frame count the cache will have. penn resamples internally, so
+    # feed it the native audio and reconcile lengths against this.
+    n_frames = int(len(audio[0]) * sample_rate / sr) // hop_size
+
+    f0 = np.zeros((N_STRINGS, n_frames), dtype=np.float32)
+    periodicity = np.zeros((N_STRINGS, n_frames), dtype=np.float32)
+
+    # Channel c carries string c. Nothing upstream documents this — it was
+    # established by measurement; see 'String ordering' in README.adoc for
+    # the evidence. It is the assumption the whole dataset rests on, since
+    # relabel.py then rewrites string s from row s.
+    for s, channel in enumerate(audio):
+        fmin, fmax = bounds[s]
+        pitch, period = penn.from_audio(
+            torch.from_numpy(channel)[None],
+            sample_rate=sr,
+            hopsize=hop_seconds,
+            fmin=fmin,
+            fmax=fmax,
+            checkpoint=None,
+            batch_size=batch_size,
+            # 'zero' pads half a window on both sides, putting frame i's
+            # centre at exactly i * hopsize. penn's default 'half-window'
+            # pads nothing, which shifts every estimate late by half a
+            # window — 64 ms — against the grid the labels sit on.
+            center="zero",
+            # penn 1.0.0 already defaults to this, but the relabelling
+            # downstream leans on it: with Viterbi doing the smoothing,
+            # relabel.py only has to fold octaves, and applies no
+            # smoothing of its own. Stated explicitly so a future change
+            # to penn's default cannot quietly remove that step.
+            decoder="viterbi",
+            gpu=gpu,
+        )
+        f0[s]          = _fit(pitch[0].cpu().numpy(), n_frames)
+        periodicity[s] = _fit(period[0].cpu().numpy(), n_frames)
+
+    # Periodicity first, so _is_done() cannot see a half-written track: it
+    # requires the f0 file, which is written last.
+    np.save(out_dir / f"{stem}-periodicity.npy", periodicity)
+    np.save(out_dir / f"{stem}-f0.npy", f0)
+    return stem
 
 
 def _fit(values: np.ndarray, n_frames: int) -> np.ndarray:

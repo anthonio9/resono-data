@@ -25,8 +25,19 @@ dev = ["pytest"]
 viz = ["matplotlib"]
 # Upstream penn, which ships FCNF0++ and fetches its weights from HuggingFace
 # on first use. Only reguitarset's track-f0 step needs it, and that step runs
-# once, so it stays out of the base install.
-relabel = ["penn>=1.0.0"]
+# once — the labels it produces are what ships — so it stays out of the base
+# install rather than constraining torch for everyone.
+#
+# The torch ceiling is penn's dependency torbi, which ships prebuilt binaries
+# per torch version and selects one by name at import ('pt211cpu'). It has
+# nothing for torch 2.12+, and the failure is an unhelpful FileNotFoundError
+# at import rather than a resolver conflict, so the bound is pinned here.
+# See 'Relabelling dependencies' in README.adoc for the CPU-index install.
+relabel = [
+    "penn>=1.0.0",
+    "torch>=2.6,<2.12",
+    "torchaudio>=2.6,<2.12",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

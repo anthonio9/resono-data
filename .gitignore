@@ -26,3 +26,7 @@ htmlcov/
 # a bare "data/" would also match the src/resono/data/ package and silently
 # stop new source files from being committed.
 /data/
+
+# Virtualenvs
+.venv/
+venv/

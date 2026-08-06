@@ -5,6 +5,7 @@ Usage:
     python -m resono.data.datasets.reguitarset track-f0   [--raw-dir DIR] [--f0-dir DIR]
                                                           [--sample-rate SR] [--hop-size H]
                                                           [--batch-size N] [--gpu N] [--limit N]
+                                                          [--workers N] [--overwrite]
     python -m resono.data.datasets.reguitarset preprocess [--raw-dir DIR] [--cache-dir DIR]
                                                           [--f0-dir DIR]
                                                           [--sample-rate SR] [--hop-size H]
@@ -58,10 +59,18 @@ def main() -> None:
     tf.add_argument("--f0-dir",      type=Path, default=_DEFAULT_F0_DIR)
     tf.add_argument("--sample-rate", type=int,  default=NATIVE_SAMPLE_RATE)
     tf.add_argument("--hop-size",    type=int,  default=NATIVE_HOP_SIZE)
-    tf.add_argument("--batch-size",  type=int,  default=2048)
+    tf.add_argument("--batch-size",  type=int,  default=128,
+                    help="Frames per forward pass. Runtime is flat in this; "
+                         "memory is linear (0.67 GB at 128, 4.21 GB at 2048)")
     tf.add_argument("--gpu",         type=int,  default=None)
     tf.add_argument("--limit",       type=int,  default=None,
                     help="Process only the first N tracks (for a timing pilot)")
+    tf.add_argument("--workers",     type=int,  default=3,
+                    help="Tracks in parallel, ~0.7 GB each. Gain saturates "
+                         "near 3 (36.9s/channel at 1, 21.8s at 3, 21.2s at 6)")
+    tf.add_argument("--overwrite",   action="store_true", default=False,
+                    help="Recompute tracks already present; otherwise the "
+                         "run resumes where it left off")
     tf.add_argument("--no-progress-bar", dest="progress",
                     action="store_false", default=True)
 
@@ -109,6 +118,7 @@ def main() -> None:
             args.raw_dir, args.f0_dir,
             sample_rate=args.sample_rate, hop_size=args.hop_size,
             batch_size=args.batch_size, gpu=args.gpu, limit=args.limit,
+            workers=args.workers, overwrite=args.overwrite,
             progress=args.progress,
         )
 

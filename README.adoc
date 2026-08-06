@@ -3,7 +3,7 @@
 :source-highlighter: highlight.js
 
 Dataset downloading, preprocessing, and PyTorch DataLoaders for guitar pitch recognition.
-Importable as `resono.data` - a namespace package designed to sit alongside the `resono` model repository.
+Importable as `resono.data` - a namespace package designed to sit alongside a model repository sharing the `resono` namespace.
 
 == Installation
 
@@ -11,6 +11,83 @@ Importable as `resono.data` - a namespace package designed to sit alongside the 
 ----
 pip install -e .
 ----
+
+That covers every pipeline here, including building the `reguitarset` cache from an F0 cache that already exists.
+It deliberately does *not* install the pitch tracker.
+
+[cols="1,4", options="header"]
+|===
+| Extra | Adds
+| `dev` | `pytest`
+| `viz` | `matplotlib`, for `python -m resono.data plot`
+| `relabel` | `penn` (FCNF0++), needed *only* by `reguitarset track-f0`
+|===
+
+[source,bash]
+----
+pip install -e '.[dev,viz]'
+----
+
+=== As a dependency of another project
+
+`resono-data` is not published to PyPI, so depend on it by path or by git URL.
+Declare it *without* extras — the base package carries no torch or torchaudio pin, so it constrains nothing in the consuming environment:
+
+[source,toml]
+----
+# pyproject.toml of the consuming project
+[project]
+dependencies = [
+    "resono-data @ file:///home/you/Projects/PitchRecognition/resono-data",
+]
+----
+
+Or pinned to a revision:
+
+[source,toml]
+----
+dependencies = [
+    "resono-data @ git+https://github.com/you/resono-data@v0.1.0",
+]
+----
+
+For local development of both repositories together, an editable install keeps edits live:
+
+[source,bash]
+----
+pip install -e ../resono-data
+----
+
+`resono.data` is a namespace package, so a consuming project may ship its own modules under the same `resono` namespace without either distribution shadowing the other.
+
+Do *not* write `resono-data[relabel]` in a consuming project unless that project itself re-runs the pitch tracker.
+The `relabel` extra pins `torch<2.12`, and that ceiling would propagate to the whole environment for a step whose output already ships as `.npy` files.
+
+=== Relabelling dependencies
+
+Skip this unless you are re-running `reguitarset track-f0`.
+That step regenerates the F0 estimates the relabelled tails are built from; its output is what ships, so it is run once and then left alone.
+
+`penn` constrains torch, which is why it is not a base dependency.
+Its own dependency `torbi` ships prebuilt binaries per torch version and picks one by name at import time — `_C.pt211cpu.abi3.so` and similar.
+It has no binary for torch 2.12 or newer, and the failure mode is a bare `FileNotFoundError: Could not find any lib files matching version pt212cu130` at import, not a resolver conflict, so `pip` will happily install a combination that cannot run.
+
+Install it into its own virtualenv, taking torch and torchaudio from the PyTorch CPU index:
+
+[source,bash]
+----
+python -m venv .venv
+.venv/bin/pip install 'torch==2.11.*' 'torchaudio==2.11.*' \
+    --index-url https://download.pytorch.org/whl/cpu
+.venv/bin/pip install -e '.[relabel,dev,viz]'
+.venv/bin/python -m resono.data.datasets.reguitarset track-f0
+----
+
+Install torch *and* torchaudio from that index in the same command, before anything else.
+Installing torch alone leaves `pip` to resolve torchaudio from PyPI, which is the CUDA build; it then fails with `OSError: libcudart.so.13: cannot open shared object file` against a CPU torch.
+
+FCNF0++'s weights are fetched from HuggingFace on first use, so no checkpoint file is needed.
+A GPU is optional — pass `--gpu 0` if you have one; the defaults above are CPU-only.
 
 == GuitarSet pipeline
 
