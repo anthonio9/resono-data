@@ -6,6 +6,12 @@ import numpy as np
 import soundfile as sf
 from tqdm import tqdm
 
+from resono.data.datasets.guitarset.tails import (
+    DROP_THRESHOLD_CENTS,
+    flatten_tails as _flatten_tails,
+    format_counts,
+)
+
 # GuitarSet native analysis parameters
 _NATIVE_HOP   = 256
 _NATIVE_SR    = 44100
@@ -20,6 +26,8 @@ def preprocess(
     remove_overhangs: bool = False,
     overhang_divider: int = 5,
     overhang_threshold_cents: float = 15.0,
+    flatten_tails: bool = False,
+    drop_threshold_cents: float = DROP_THRESHOLD_CENTS,
     progress: bool = True,
 ) -> None:
     """Convert raw GuitarSet files to .npy cache.
@@ -44,6 +52,18 @@ def preprocess(
     overhang_threshold_cents:
         Maximum pitch deviation (cents) allowed in the tail before a frame
         is considered an overhang and silenced. Default 15 cents.
+    flatten_tails:
+        If True, hold each note's pre-drop pitch through the pitch fall at its
+        end, so the label reads as if the string never slackened. A decaying
+        string really does fall in pitch, but reported as a label it becomes a
+        MIDI pitch bend at every note ending. Slides and released bends are
+        preserved. See :mod:`guitarset.tails`.
+
+        This is an alternative to remove_overhangs, not a companion to it: one
+        deletes the drifting frames, the other corrects them. Enabling both
+        silences frames that flattening would have fixed.
+    drop_threshold_cents:
+        How far below the body a frame must sit to count as part of the drop.
     progress:
         Show a progress bar over tracks. Enabled by default; pass False (or
         --no-progress-bar on the CLI) to silence it.
@@ -53,6 +73,7 @@ def preprocess(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     hop_s = hop_size / sample_rate
+    flatten_counts: dict[str, int] = {}
 
     # Discover files with rglob so the exact extraction layout doesn't matter:
     # mono-mic audio ends in '_mic.wav', annotations in '.jams', wherever they sit.
@@ -91,6 +112,12 @@ def preprocess(
         onset = np.zeros_like(voiced, dtype=bool)
         onset[:, 0] = note_ids[:, 0] != -1
         onset[:, 1:] = (note_ids[:, 1:] != note_ids[:, :-1]) & (note_ids[:, 1:] != -1)
+        if flatten_tails:
+            pitch, counts = _flatten_tails(
+                pitch, note_ids, hop_s, drop_threshold_cents
+            )
+            for action, count in counts.items():
+                flatten_counts[action] = flatten_counts.get(action, 0) + count
         if remove_overhangs:
             pitch, voiced = remove_pitch_overhangs(
                 pitch, voiced, note_ids,
@@ -101,6 +128,9 @@ def preprocess(
         np.save(out_dir / f"{stem}-onset.npy",  onset)
 
     print(f"Preprocessed {len(audio_files)} tracks → {out_dir}")
+    if flatten_tails:
+        print("Tail flattening:")
+        print(format_counts(flatten_counts))
 
 
 # ---------------------------------------------------------------------------

@@ -4,6 +4,7 @@ Usage:
     python -m resono.data.datasets.guitarset download   [--raw-dir DIR] [--no-progress-bar]
     python -m resono.data.datasets.guitarset preprocess [--raw-dir DIR] [--cache-dir DIR]
                                                         [--sample-rate SR] [--hop-size H]
+                                                        [--flatten-tails]
                                                         [--no-progress-bar]
     python -m resono.data.datasets.guitarset partition  [--cache-dir DIR] [--partitions-dir DIR]
                                                         [--no-player-split] [--seed N]
@@ -44,6 +45,13 @@ def main() -> None:
     pp.add_argument("--remove-overhangs",         action="store_true", default=False)
     pp.add_argument("--overhang-divider",         type=int,   default=5)
     pp.add_argument("--overhang-threshold-cents", type=float, default=15.0)
+    pp.add_argument("--flatten-tails",             action="store_true", default=False,
+                    help="Hold each note's pre-drop pitch through the pitch "
+                         "fall at its end, so the label does not read as a "
+                         "MIDI pitch bend. Slides and released bends survive")
+    pp.add_argument("--drop-threshold-cents",      type=float, default=25.0,
+                    help="How far below the body a frame must sit to count as "
+                         "part of the drop (with --flatten-tails)")
     pp.add_argument("--no-progress-bar", dest="progress",
                     action="store_false", default=True)
 
@@ -72,6 +80,8 @@ def main() -> None:
             remove_overhangs=args.remove_overhangs,
             overhang_divider=args.overhang_divider,
             overhang_threshold_cents=args.overhang_threshold_cents,
+            flatten_tails=args.flatten_tails,
+            drop_threshold_cents=args.drop_threshold_cents,
             progress=args.progress,
         )
     elif args.command == "partition":
