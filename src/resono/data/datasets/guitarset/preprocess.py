@@ -12,6 +12,25 @@ from resono.data.datasets.guitarset.tails import (
     format_counts,
 )
 
+# GuitarSet recorded every performance twice, simultaneously: an air
+# microphone and the guitar's own pickup, under one set of annotations. The
+# pickup is the deployment signal for a plugged-in guitar, the microphone is
+# what every published GuitarSet result uses, and they are interchangeable
+# here because the labels do not depend on which one you read.
+#
+# 'pickup' is the mono *mix*, not a sum of the debleeded hex channels: it
+# correlates +1.0000 with the sum of the original hex and only +0.92-0.98 with
+# the debleeded sum, because a real magnetic pickup senses all six strings with
+# inter-string bleed. Summing debleeded channels would give a signal cleaner
+# than any physical pickup can be.
+AUDIO_SOURCES = {
+    "mic":    ("audio_mono-mic",        "_mic"),
+    "pickup": ("audio_mono-pickup_mix", "_mix"),
+}
+
+# Where each source's cache lands, so the two never overwrite each other.
+DATASET_NAMES = {"mic": "guitarset", "pickup": "guitarset-pickup"}
+
 # GuitarSet native analysis parameters
 _NATIVE_HOP   = 256
 _NATIVE_SR    = 44100
@@ -28,6 +47,8 @@ def preprocess(
     overhang_threshold_cents: float = 15.0,
     flatten_tails: bool = False,
     drop_threshold_cents: float = DROP_THRESHOLD_CENTS,
+    audio_source: str = "mic",
+    dataset_name: str | None = None,
     progress: bool = True,
 ) -> None:
     """Convert raw GuitarSet files to .npy cache.
@@ -64,28 +85,46 @@ def preprocess(
         silences frames that flattening would have fixed.
     drop_threshold_cents:
         How far below the body a frame must sit to count as part of the drop.
+    audio_source:
+        'mic' (default) or 'pickup'; see :data:`AUDIO_SOURCES`. Labels are
+        identical either way — only the audio differs.
+    dataset_name:
+        Cache subdirectory and partition name. Defaults to 'guitarset' for the
+        microphone and 'guitarset-pickup' for the pickup, so building one never
+        overwrites the other.
     progress:
         Show a progress bar over tracks. Enabled by default; pass False (or
         --no-progress-bar on the CLI) to silence it.
     """
+    if audio_source not in AUDIO_SOURCES:
+        raise ValueError(
+            f"audio_source must be one of {sorted(AUDIO_SOURCES)}, got {audio_source!r}"
+        )
+    subdir, suffix = AUDIO_SOURCES[audio_source]
+    dataset_name = dataset_name or DATASET_NAMES[audio_source]
+
     gset_root = Path(raw_dir) / "guitarset"
-    out_dir   = Path(cache_dir) / "guitarset"
+    out_dir   = Path(cache_dir) / dataset_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
     hop_s = hop_size / sample_rate
     flatten_counts: dict[str, int] = {}
 
     # Discover files with rglob so the exact extraction layout doesn't matter:
-    # mono-mic audio ends in '_mic.wav', annotations in '.jams', wherever they sit.
-    audio_files = sorted(gset_root.rglob("*_mic.wav"))
+    # each source's audio ends in its own suffix, annotations in '.jams',
+    # wherever they sit.
+    audio_files = sorted(gset_root.rglob(f"*{suffix}.wav"))
     if not audio_files:
-        raise FileNotFoundError(f"No *_mic.wav files found under {gset_root}")
+        raise FileNotFoundError(
+            f"No *{suffix}.wav files found under {gset_root}. The {audio_source!r} "
+            f"source needs the {subdir} archive — run 'guitarset download'."
+        )
     jams_index = {p.stem: p for p in gset_root.rglob("*.jams")}
 
     for audio_file in tqdm(
         audio_files, desc="Preprocessing", unit="track", disable=not progress
     ):
-        stem = audio_file.stem.replace("_mic", "")
+        stem = audio_file.stem[: -len(suffix)]
         jams_file = jams_index.get(stem)
         if jams_file is None:
             tqdm.write(f"  warning: no JAMS for {stem}, skipping")
@@ -127,7 +166,7 @@ def preprocess(
         np.save(out_dir / f"{stem}-voiced.npy", voiced)
         np.save(out_dir / f"{stem}-onset.npy",  onset)
 
-    print(f"Preprocessed {len(audio_files)} tracks → {out_dir}")
+    print(f"Preprocessed {len(audio_files)} tracks ({audio_source}) → {out_dir}")
     if flatten_tails:
         print("Tail flattening:")
         print(format_counts(flatten_counts))
