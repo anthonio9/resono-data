@@ -29,7 +29,10 @@ AUDIO_SOURCES = {
 }
 
 # Where each source's cache lands, so the two never overwrite each other.
-DATASET_NAMES = {"mic": "guitarset", "pickup": "guitarset-pickup"}
+# Named symmetrically: neither recording is the default one, and a config
+# naming 'guitarset-mic' says which transducer it means rather than leaving it
+# to be inferred.
+DATASET_NAMES = {"mic": "guitarset-mic", "pickup": "guitarset-pickup"}
 
 # GuitarSet native analysis parameters
 _NATIVE_HOP   = 256
@@ -89,9 +92,9 @@ def preprocess(
         'mic' (default) or 'pickup'; see :data:`AUDIO_SOURCES`. Labels are
         identical either way — only the audio differs.
     dataset_name:
-        Cache subdirectory and partition name. Defaults to 'guitarset' for the
-        microphone and 'guitarset-pickup' for the pickup, so building one never
-        overwrites the other.
+        Cache subdirectory and partition name. Defaults to 'guitarset-mic' for
+        the microphone and 'guitarset-pickup' for the pickup, so building one
+        never overwrites the other.
     progress:
         Show a progress bar over tracks. Enabled by default; pass False (or
         --no-progress-bar on the CLI) to silence it.

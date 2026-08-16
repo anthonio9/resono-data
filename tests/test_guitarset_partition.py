@@ -6,16 +6,16 @@ import pytest
 from resono.data.datasets.guitarset.partition import cv_folds, partition
 
 
-def _make_cache(tmp_path, stems):
-    cache = tmp_path / "cache" / "guitarset"
+def _make_cache(tmp_path, stems, name="guitarset-mic"):
+    cache = tmp_path / "cache" / name
     cache.mkdir(parents=True)
     for stem in stems:
         np.save(cache / f"{stem}-audio.npy", np.zeros(256, dtype=np.float32))
     return tmp_path / "cache"
 
 
-def _read(partitions_dir):
-    with open(partitions_dir / "guitarset.json") as f:
+def _read(partitions_dir, name="guitarset-mic"):
+    with open(partitions_dir / f"{name}.json") as f:
         return json.load(f)
 
 
@@ -98,8 +98,8 @@ def test_random_split_reproducible(tmp_path):
     partition(cache_dir, pd1, split_by_player=False, seed=7)
     partition(cache_dir, pd2, split_by_player=False, seed=7)
 
-    with open(pd1 / "guitarset.json") as f: p1 = json.load(f)
-    with open(pd2 / "guitarset.json") as f: p2 = json.load(f)
+    with open(pd1 / "guitarset-mic.json") as f: p1 = json.load(f)
+    with open(pd2 / "guitarset-mic.json") as f: p2 = json.load(f)
     assert p1 == p2
 
 
@@ -116,7 +116,7 @@ def test_cv_folds_creates_six_files(tmp_path):
     cv_folds(cache_dir, partitions_dir)
 
     for fold in range(6):
-        assert (partitions_dir / f"guitarset_fold{fold}.json").exists()
+        assert (partitions_dir / f"guitarset-mic_fold{fold}.json").exists()
 
 
 def test_cv_folds_no_leakage(tmp_path):
@@ -128,7 +128,7 @@ def test_cv_folds_no_leakage(tmp_path):
     cv_folds(cache_dir, partitions_dir)
 
     for fold in range(6):
-        with open(partitions_dir / f"guitarset_fold{fold}.json") as f:
+        with open(partitions_dir / f"guitarset-mic_fold{fold}.json") as f:
             p = json.load(f)
         train_stems = set(p["train"])
         valid_stems = set(p["valid"])
@@ -149,7 +149,7 @@ def test_cv_folds_all_players_appear_as_test(tmp_path):
 
     test_players = set()
     for fold in range(6):
-        with open(partitions_dir / f"guitarset_fold{fold}.json") as f:
+        with open(partitions_dir / f"guitarset-mic_fold{fold}.json") as f:
             p = json.load(f)
         for stem in p["test"]:
             test_players.add(stem[:2])

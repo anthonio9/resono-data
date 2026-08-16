@@ -11,6 +11,8 @@ def partition(
     val_players: list[str] | None = None,
     test_players: list[str] | None = None,
     seed: int = 42,
+    name: str = "guitarset-mic",
+    mirror_from: str | None = "guitarset-mic",
 ) -> None:
     """Write train/valid/test split JSON for GuitarSet.
 
@@ -18,7 +20,23 @@ def partition(
     Random split: 70 / 15 / 15 %.
 
     The stem for each track is its track ID (e.g. '00_BN1-129-Eb_solo'),
-    derived by stripping the '_mic' suffix from the audio filename.
+    derived by stripping the audio suffix from the filename.
+
+    Parameters
+    ----------
+    name:
+        Dataset to split: the cache subdirectory to read and the JSON to
+        write. 'guitarset-pickup' is the same performances through the
+        guitar's pickup.
+    mirror_from:
+        When ``name`` differs from this and that split exists, copy it
+        verbatim rather than computing a new one. The variants hold the same
+        stems, so an independent split could put a performance in train under
+        one name and in test under another — different audio, identical notes
+        and labels, and a model that has seen the answer. Recomputing would
+        usually agree, the player split being deterministic, but only while
+        the players are left at their defaults. Pass None to force a fresh
+        split.
     """
     # GuitarSet has 6 players (IDs '00'–'05'), each contributing 60 tracks
     # (6 chord types × 5 styles × 2 tempos). Assigning the last two players
@@ -30,13 +48,18 @@ def partition(
     if test_players is None:
         test_players = ["05"]
 
-    gset_cache = Path(cache_dir) / "guitarset"
+    gset_cache = Path(cache_dir) / name
     stems = sorted(
         p.stem[:-6]                          # strip '-audio' (6 chars)
         for p in gset_cache.glob("*-audio.npy")
     )
     if not stems:
         raise FileNotFoundError(f"No preprocessed files found in {gset_cache}")
+
+    source = Path(partitions_dir) / f"{mirror_from}.json" if mirror_from else None
+    if source is not None and name != mirror_from and source.exists():
+        _mirror(source, set(stems), Path(partitions_dir) / f"{name}.json")
+        return
 
     if split_by_player:
         train, valid, test = [], [], []
@@ -65,7 +88,7 @@ def partition(
     }
 
     Path(partitions_dir).mkdir(parents=True, exist_ok=True)
-    out = Path(partitions_dir) / "guitarset.json"
+    out = Path(partitions_dir) / f"{name}.json"
     with open(out, "w") as f:
         json.dump(result, f, indent=2)
 
@@ -75,9 +98,33 @@ def partition(
     )
 
 
+def _mirror(source: Path, cached: set[str], out: Path) -> None:
+    """Copy a split verbatim, checking it names only cached stems."""
+    with open(source) as f:
+        split = json.load(f)
+
+    missing = {s for stems in split.values() for s in stems} - cached
+    if missing:
+        raise ValueError(
+            f"{len(missing)} stems in {source.name} are missing from the cache "
+            f"being split (e.g. {sorted(missing)[:3]}). Build it for the same "
+            "tracks, or pass mirror_from=None to split what is there."
+        )
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w") as f:
+        json.dump(split, f, indent=2)
+    print(
+        f"Partition mirrored from {source.name} → {out}: "
+        f"{len(split['train'])} train / {len(split['valid'])} valid / "
+        f"{len(split['test'])} test"
+    )
+
+
 def cv_folds(
     cache_dir: Path,
     partitions_dir: Path,
+    name: str = "guitarset-mic",
 ) -> None:
     """Write one partition JSON per 6-fold cross-validation rotation.
 
@@ -86,12 +133,16 @@ def cv_folds(
     protocol. This removes the variance introduced by any single fixed
     choice of val/test players and lets you average metrics across all folds.
 
-    Writes guitarset_fold0.json … guitarset_fold5.json to partitions_dir.
-    These are independent of the default guitarset.json produced by partition().
+    Writes {name}_fold0.json … {name}_fold5.json to partitions_dir, independent
+    of the {name}.json produced by partition().
+
+    Folds are computed per dataset rather than mirrored, so building them for
+    two audio sources of the same performances would split those performances
+    independently — see partition()'s mirror_from.
     """
     all_players = ["00", "01", "02", "03", "04", "05"]
 
-    gset_cache = Path(cache_dir) / "guitarset"
+    gset_cache = Path(cache_dir) / name
     stems = sorted(
         p.stem[:-6]
         for p in gset_cache.glob("*-audio.npy")
@@ -120,7 +171,7 @@ def cv_folds(
         )
 
         result = {"train": train, "valid": valid, "test": test}
-        out = Path(partitions_dir) / f"guitarset_fold{fold}.json"
+        out = Path(partitions_dir) / f"{name}_fold{fold}.json"
         with open(out, "w") as f:
             json.dump(result, f, indent=2)
 

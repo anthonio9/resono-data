@@ -18,8 +18,8 @@ with --no-progress-bar.
 import argparse
 from pathlib import Path
 
-from resono.data.datasets.guitarset.download import download
-from resono.data.datasets.guitarset.preprocess import preprocess
+from resono.data.datasets.guitarset.download import ARCHIVES, download
+from resono.data.datasets.guitarset.preprocess import AUDIO_SOURCES, preprocess
 from resono.data.datasets.guitarset.partition import cv_folds, partition
 
 
@@ -33,6 +33,13 @@ def main() -> None:
     # download
     dl = sub.add_parser("download", help="Download from Zenodo")
     dl.add_argument("--raw-dir", type=Path, default=Path("data/raw"))
+    dl.add_argument("--archives", nargs="+", default=None, choices=sorted(ARCHIVES),
+                    help="Which archives to fetch; default all three (~1.4 GB)")
+    dl.add_argument("--keep-sharp-names", dest="rename_sharp",
+                    action="store_false", default=True,
+                    help="Keep the archive's own '#' spelling instead of "
+                         "rewriting it to 'sharp'. Mixing spellings across "
+                         "archives drops tracks silently, so this is on by default")
     dl.add_argument("--no-progress-bar", dest="progress",
                     action="store_false", default=True)
 
@@ -52,6 +59,13 @@ def main() -> None:
     pp.add_argument("--drop-threshold-cents",      type=float, default=25.0,
                     help="How far below the body a frame must sit to count as "
                          "part of the drop (with --flatten-tails)")
+    pp.add_argument("--audio-source", choices=sorted(AUDIO_SOURCES), default="mic",
+                    help="Which simultaneous recording to cache: the air "
+                         "microphone, or the guitar's own pickup. Labels are "
+                         "identical either way")
+    pp.add_argument("--dataset-name", default=None,
+                    help="Cache subdirectory and partition name; defaults to "
+                         "guitarset for mic and guitarset-pickup for pickup")
     pp.add_argument("--no-progress-bar", dest="progress",
                     action="store_false", default=True)
 
@@ -59,6 +73,14 @@ def main() -> None:
     pt = sub.add_parser("partition", help="Create train/valid/test split")
     pt.add_argument("--cache-dir",      type=Path,  default=Path("data/cache"))
     pt.add_argument("--partitions-dir", type=Path,  default=Path("data/partitions"))
+    pt.add_argument("--name", default="guitarset-mic",
+                    help="Dataset name to split, for GuitarSet-derived caches "
+                         "sharing these stems and this player numbering")
+    pt.add_argument("--no-mirror", dest="mirror_from", action="store_const", const=None,
+                    default="guitarset-mic",
+                    help="Compute a fresh split instead of copying guitarset-mic's. "
+                         "Variants hold the same performances, so splitting "
+                         "them independently can leak across train and test")
     pt.add_argument("--no-player-split", dest="split_by_player",
                     action="store_false", default=True)
     pt.add_argument("--val-players",  nargs="+", default=None)
@@ -69,11 +91,14 @@ def main() -> None:
     cv = sub.add_parser("cv-folds", help="Write all 6 cross-validation fold JSONs")
     cv.add_argument("--cache-dir",      type=Path, default=Path("data/cache"))
     cv.add_argument("--partitions-dir", type=Path, default=Path("data/partitions"))
+    cv.add_argument("--name", default="guitarset-mic",
+                    help="Dataset to fold, matching preprocess's output name")
 
     args = parser.parse_args()
 
     if args.command == "download":
-        download(args.raw_dir, progress=args.progress)
+        download(args.raw_dir, archives=args.archives,
+                 rename_sharp=args.rename_sharp, progress=args.progress)
     elif args.command == "preprocess":
         preprocess(
             args.raw_dir, args.cache_dir, args.sample_rate, args.hop_size,
@@ -82,6 +107,8 @@ def main() -> None:
             overhang_threshold_cents=args.overhang_threshold_cents,
             flatten_tails=args.flatten_tails,
             drop_threshold_cents=args.drop_threshold_cents,
+            audio_source=args.audio_source,
+            dataset_name=args.dataset_name,
             progress=args.progress,
         )
     elif args.command == "partition":
@@ -91,9 +118,11 @@ def main() -> None:
             val_players=args.val_players,
             test_players=args.test_players,
             seed=args.seed,
+            name=args.name,
+            mirror_from=args.mirror_from,
         )
     elif args.command == "cv-folds":
-        cv_folds(args.cache_dir, args.partitions_dir)
+        cv_folds(args.cache_dir, args.partitions_dir, name=args.name)
 
 
 if __name__ == "__main__":
