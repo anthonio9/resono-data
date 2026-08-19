@@ -1,4 +1,4 @@
-from resono.data.datasets import gaps, guitarset, guitartechs
+from resono.data.datasets import gaps, goat, guitarset, guitartechs
 
 # Registry maps dataset name → module exposing download(), preprocess(), partition().
 # To add a new dataset: implement those three functions following base.DatasetModule,
@@ -11,4 +11,5 @@ REGISTRY = {
     "guitarset": guitarset,
     "guitartechs": guitartechs,
     "gaps": gaps,
+    "goat": goat,
 }
