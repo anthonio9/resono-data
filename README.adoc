@@ -170,17 +170,44 @@ Onsets are drawn where the dataset provides them; GuitarSet has no onset file, a
 
 == Aligning labels with the note attacks
 
-Annotation pipelines often put note starts late: measured against the pick attack, GuitarSet's onset and voicing labels sit about 17 ms late (both microphone and pickup), Guitar-TECHS's about 7 ms, GOAT's anywhere from on time to 35 ms late depending on the take, with ±13 ms between notes; GAPS is on time.
-A causal model trained on late labels learns to be late.
+Annotation pipelines often put note starts late.
+Measured against the pick attack at 44.1 kHz, GuitarSet's onset and voicing labels sit about 17 ms late (pickup −17.8 ms, microphone −15.6 ms, ±2-3 ms within a take).
+Most Guitar-TECHS takes are on time, but a tenth of them are about 18 ms late.
+GOAT's takes range from on time to about 35 ms late, and its notes scatter by ±12 ms even within one take.
+GAPS is on time.
+A causal model trained on late labels learns to be late: trained on these, the model's notes start a median 17 ms after the pick.
 `resono.data.align` measures this per track and writes a corrected copy of a dataset's cache.
+
+=== Why the labels need moving
+
+The six single notes below come from GuitarSet's pickup recordings.
+In each, the waveform jumps and the note's own harmonic energy (blue) climbs by about 20 dB at the pick attack, and the original labels (grey) only begin about 17 ms later, once the note is already at full level.
+The first three frames of every note are labelled as silence.
+Moving the labels three 5.8 ms frames earlier (red) puts them on the attack.
+
+image::docs/images/label-alignment-lone-notes.png[GuitarSet pickup: six single notes with the original labels starting about 17 ms after the attack and the aligned labels starting on it]
+
+A strum keeps its shape.
+GuitarSet was annotated from a hexaphonic pickup, one signal per string, so the spread of its labels across a strum, here about 8 ms per string over 41 ms, is real; the constant shift moves the whole strum and keeps the spread.
+The low string's aligned onset sits on the strum's first transient in the waveform.
+The higher strings' energy curves rise before even their aligned labels because they are octaves and fifths of the low string (F#4 is F#2's fourth harmonic), so their partials sound as soon as the low string is struck.
+That is why a dataset with a constant lateness, like GuitarSet, is better corrected by one shift than by snapping each note.
+
+image::docs/images/label-alignment-strum.png[GuitarSet pickup: a six-string downstroke with the original and aligned labels on each string]
+
+Both figures come from `apply --mode constant --shift-frames -3` on the 44.1 kHz cache.
+
+=== Usage
 
 [source,bash]
 ----
 python -m resono.data.align measure --dataset guitarset-pickup --cache-dir data/cache-44k --sample-rate 44100
 python -m resono.data.align apply --dataset guitarset-pickup --cache-dir data/cache-44k --sample-rate 44100 \
     --output-root data/cache-44k-aligned --mode constant --shift-frames -3
-python -m resono.data.align apply --dataset goat --output-root data/cache-aligned --mode snap
-python -m resono.data.align apply --dataset gaps --output-root data/cache-aligned --mode constant --shift-frames 0
+python -m resono.data.align apply --dataset goat --cache-dir data/cache-44k --sample-rate 44100 \
+    --output-root data/cache-44k-aligned --mode per-track
+python -m resono.data.align apply --dataset gaps --cache-dir data/cache-44k --sample-rate 44100 \
+    --output-root data/cache-44k-aligned --mode constant --shift-frames 0
 ----
 
 `measure` prints each track's shift (attack minus label) and the constant correction in frames it suggests.
@@ -188,9 +215,9 @@ python -m resono.data.align apply --dataset gaps --output-root data/cache-aligne
 Onset, voicing and pitch always move together.
 The modes:
 
-constant:: every track moves by `--shift-frames` (or `--shift-ms`, rounded). No audio analysis. Right for datasets whose labels are late by the same amount throughout (GuitarSet, Guitar-TECHS).
-per-track:: every track moves by its own measured shift; tracks with too few lone notes to measure get the dataset's median.
-snap:: per-track, then each note whose attack was found has its start moved onto the frame holding it, its end left alone. For labels that jitter from note to note (GOAT).
+constant:: every track moves by `--shift-frames` (or `--shift-ms`, rounded). No audio analysis. Right for datasets whose labels are late by the same amount throughout (GuitarSet).
+per-track:: every track moves by its own measured shift; tracks with too few lone notes to measure get the dataset's median. Right where the lateness differs from take to take (Guitar-TECHS, GOAT).
+snap:: per-track, then each note whose attack was found has its start moved onto the frame holding it, its end left alone. Meant for labels that jitter from note to note, but checked by eye on GOAT it is reliable only where a pick transient confirms the attack, and fails on strums, whose notes GOAT labels as one instant; GOAT is better served by per-track.
 
 Training reads every dataset from one cache root, so a dataset that needs no correction goes next to the others with `--mode constant --shift-frames 0`.
 Apply the same correction to every split: the evaluation then measures against the real attacks too.
