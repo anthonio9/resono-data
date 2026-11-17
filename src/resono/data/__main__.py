@@ -13,6 +13,10 @@ Each dataset exposes its own pipeline under resono.data.datasets.<name>:
 Inspect preprocessed labels against the audio they describe (any dataset):
     python -m resono.data plot --list-stems
     python -m resono.data plot --dataset gaps --stem 001_mvswc --start 40
+
+Measure and correct label timing against the note attacks (any dataset):
+    python -m resono.data.align measure --dataset goat
+    python -m resono.data.align apply --dataset goat --mode snap --output-root data/cache-aligned
 """
 import argparse
 import sys

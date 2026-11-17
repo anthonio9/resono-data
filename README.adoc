@@ -168,6 +168,38 @@ The lower panel gives each string its own labelled lane — six categorical colo
 
 Onsets are drawn where the dataset provides them; GuitarSet has no onset file, and the title says so rather than leaving a silent absence.
 
+== Aligning labels with the note attacks
+
+Annotation pipelines often put note starts late: measured against the pick attack, GuitarSet's onset and voicing labels sit about 17 ms late (both microphone and pickup), Guitar-TECHS's about 7 ms, GOAT's anywhere from on time to 35 ms late depending on the take, with ±13 ms between notes; GAPS is on time.
+A causal model trained on late labels learns to be late.
+`resono.data.align` measures this per track and writes a corrected copy of a dataset's cache.
+
+[source,bash]
+----
+python -m resono.data.align measure --dataset guitarset-pickup --cache-dir data/cache-44k --sample-rate 44100
+python -m resono.data.align apply --dataset guitarset-pickup --cache-dir data/cache-44k --sample-rate 44100 \
+    --output-root data/cache-44k-aligned --mode constant --shift-frames -3
+python -m resono.data.align apply --dataset goat --output-root data/cache-aligned --mode snap
+python -m resono.data.align apply --dataset gaps --output-root data/cache-aligned --mode constant --shift-frames 0
+----
+
+`measure` prints each track's shift (attack minus label) and the constant correction in frames it suggests.
+`apply` writes `OUTPUT_ROOT/NAME/` with the corrected labels, hard-links the audio, and records what it did in `alignment.json`; a dataset that already carries one is refused, so a correction can't be applied twice.
+Onset, voicing and pitch always move together.
+The modes:
+
+constant:: every track moves by `--shift-frames` (or `--shift-ms`, rounded). No audio analysis. Right for datasets whose labels are late by the same amount throughout (GuitarSet, Guitar-TECHS).
+per-track:: every track moves by its own measured shift; tracks with too few lone notes to measure get the dataset's median.
+snap:: per-track, then each note whose attack was found has its start moved onto the frame holding it, its end left alone. For labels that jitter from note to note (GOAT).
+
+Training reads every dataset from one cache root, so a dataset that needs no correction goes next to the others with `--mode constant --shift-frames 0`.
+Apply the same correction to every split: the evaluation then measures against the real attacks too.
+
+How the attacks are found (`align/snapper.py`): a comb at the note's own harmonics finds when its partials appear, which keeps a chord tone from snapping to its neighbour's attack, and a broadband transient then places the pick click to about a millisecond.
+The search is confined to where the attack can be given the track's measured shift and jitter.
+Strummed notes are left on their shifted label when a track's labels are tight, since there the label is closer than any snap.
+On synthetic plucks with known attacks, snapping lands isolated notes, notes over ringing strings, re-strikes and soft plucks on the right 5.8 ms frame 83-99% of the time; fast strums with jittery labels remain the hard case (about a third exact, half within one frame).
+
 == Usage in Python
 
 [source,python]
